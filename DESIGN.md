@@ -6,7 +6,10 @@
 
 ## Status
 
-Design phase — architecture drafted, first vertical slice not yet built (Sept 2026).
+Vertical slice in progress (Sept 2026): one weapon (Tank), one enemy
+(TrainingDummy), server-authoritative parry/hit-reg/stagger loop implemented
+per the build order below. Class framework, generalized enemy AI, dungeon
+generation, loot, economy, healer balance, and PvP are still ahead.
 
 ## Core loop
 
@@ -42,6 +45,15 @@ spend coins/crystals at the blacksmith to upgrade existing gear → repeat.
   trash-mob grinding alone can't reach max gear.
 - **Combat is primarily PvE** (zombies/monsters); PvP exists but reuses the
   same combat system rather than a separate one.
+- **RemoteEvents are created at runtime**, not represented as Rojo-synced
+  files. A shared `Remotes.luau` module creates them under
+  `ReplicatedStorage.Remotes` on first use server-side; clients `WaitForChild`
+  them. Keeps the "everything lives in one place" rule from ARCHITECTURE.md
+  without needing binary `.rbxm`/`.model.json` assets in git.
+- **Parry timing is validated using server receipt time, not the client's
+  timestamp.** Client/server `os.clock()` aren't synchronized, so the
+  documented latency-compensation buffer (~ping/2) is applied to when the
+  server *received* the ParryAttempt, not to a client-supplied clock value.
 
 ## Open / not yet decided
 
@@ -53,8 +65,10 @@ spend coins/crystals at the blacksmith to upgrade existing gear → repeat.
 
 ## Build order
 
-1. Vertical slice: one room, one enemy, one weapon — get parry, hit-reg, and
-   stagger feeling right, fully server-authoritative.
+1. ~~Vertical slice: one room, one enemy, one weapon~~ — get parry, hit-reg,
+   and stagger feeling right, fully server-authoritative. **Implemented**:
+   Tank vs. TrainingDummy, no room/level art yet (just a bare Workspace
+   spawn point) — still needs in-Studio playtesting to confirm the feel.
 2. Weapon/class data framework (2–3 classes).
 3. Enemy AI + telegraph system, generalized across enemy types.
 4. Room-based dungeon generator.

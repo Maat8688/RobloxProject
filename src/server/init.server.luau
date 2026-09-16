@@ -1,1 +1,2 @@
-print("Hello world, from server!")
+local CombatServer = require(script:WaitForChild("Combat"):WaitForChild("CombatServer"))
+CombatServer.Start()

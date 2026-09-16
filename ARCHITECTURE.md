@@ -20,28 +20,31 @@
 
 ```
 src/
-  ReplicatedStorage/
-    Shared/
-      WeaponDefs.lua        -- weaponId -> class, stats, moveset, ability kit
-      LootTables.lua        -- encounterGroupId -> possible drops
-      CombatConstants.lua   -- parry windows, stagger values, stamina costs
-      EnemyDefs.lua
-    Remotes/                 -- every RemoteEvent/RemoteFunction lives here,
-                              -- nothing created ad hoc elsewhere
-  ServerScriptService/
+  shared/                        -- -> ReplicatedStorage.Shared
+    WeaponDefs.luau              -- weaponId -> class, stats, moveset, ability kit
+    LootTables.luau              -- encounterGroupId -> possible drops (not built yet)
+    CombatConstants.luau         -- parry windows, stagger values, timing
+    EnemyDefs.luau
+    Remotes.luau                 -- name constants + Remotes.Get(name); creates/finds
+                                  -- the actual RemoteEvents under ReplicatedStorage.Remotes
+                                  -- at runtime (not a Rojo-mapped path — RemoteEvents
+                                  -- are runtime Instances, not source files)
+  server/                        -- -> ServerScriptService.Server
     Combat/
-      CombatServer.lua       -- hit reg, parry validation, damage resolution
-      EnemyAI.lua
-    Dungeon/
-      DungeonGenerator.lua
-      RoomTemplates/          -- pre-built Room models w/ marked spawn points
-    Economy/
-      LootService.lua
-      BlacksmithService.lua
-    DataService.lua           -- DataStore read/write, owns the PlayerData schema
-  StarterPlayer/StarterPlayerScripts/
-    CombatClient.lua          -- input capture, parry timestamp send, VFX
-    UI/
+      CombatServer.luau          -- rate-limits attacks, wires remotes to enemy instances
+      Enemy.luau                 -- one enemy's state machine + Workspace model
+                                  -- (EnemyAI.luau will generalize this across enemy
+                                  -- types in build order step 3)
+    Dungeon/                     -- not built yet
+      DungeonGenerator.luau
+      RoomTemplates/
+    Economy/                     -- not built yet
+      LootService.luau
+      BlacksmithService.luau
+    DataService.luau             -- not built yet — DataStore read/write, PlayerData schema
+  client/                        -- -> StarterPlayer.StarterPlayerScripts.Client
+    CombatClient.luau            -- input capture, remote feedback (color flash for now)
+    UI/                          -- not built yet
 ```
 
 ## Naming registry — RemoteEvents / RemoteFunctions
@@ -49,11 +52,19 @@ src/
 | Name | Direction | Payload | Purpose |
 |---|---|---|---|
 | `ParryAttempt` | Client → Server | `{ timestamp }` | Player attempts a parry |
+| `AttackAttempt` | Client → Server | `{ timestamp }` | Player attempts a basic weapon swing |
 | `EnemyTelegraphStart` | Server → Client | `{ enemyId, attackId, duration }` | Attack is winding up — VFX/audio cue |
+| `EnemyStateChanged` | Server → Client | `{ enemyId, state, hp }` | Enemy entered Idle/Telegraph/Staggered/Recover/Dead |
 | `PlayerHit` | Server → Client | `{ amount, sourceId }` | Damage feedback |
 | `RequestUpgrade` | Client → Server (returns) | `{ itemId }` → `{ success, newStats?, error? }` | Blacksmith upgrade attempt |
 | `ChestOpened` | Server → Client | `{ chestId, loot[] }` | Fired when the guard encounter is cleared |
 | *(add new rows here as they're built)* | | | |
+
+> `ParryAttempt`/`AttackAttempt` carry a client timestamp for future prediction
+> use, but the server does not trust it for parry validation — client and
+> server `os.clock()` aren't synchronized. Instead the server uses its own
+> receipt time minus half the player's `GetNetworkPing()`, compared against
+> the enemy's known telegraph resolve time (see `Combat/Enemy.luau`).
 
 ## Naming registry — Classes / weapon types
 
@@ -64,6 +75,13 @@ src/
 | `Healer` | Staff / Mace | Parries near allies trigger burst heal |
 | `Mage` | Staff / Wand | Exception — magic replaces basic combat, not just enhances it |
 | *(add new rows here as they're built)* | | |
+
+## Naming registry — Enemy ids
+
+| Id | Notes |
+|---|---|
+| `TrainingDummy` | Vertical-slice-only melee dummy, one parryable `Swing` attack, no `encounterGroupId` (doesn't guard a chest) |
+| *(add new rows here as they're built)* | |
 
 ## Naming registry — Encounter / loot tags
 
