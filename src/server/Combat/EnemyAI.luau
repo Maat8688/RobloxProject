@@ -20,6 +20,8 @@ export type Enemy = {
 	model: Model,
 	root: BasePart,
 	attackIndex: number,
+	health: number,
+	alive: boolean,
 }
 
 function EnemyAI.spawn(defId: string, position: Vector3, facePosition: Vector3): Enemy
@@ -55,6 +57,8 @@ function EnemyAI.spawn(defId: string, position: Vector3, facePosition: Vector3):
 		model = model,
 		root = root,
 		attackIndex = 0,
+		health = def.maxHealth,
+		alive = true,
 	}
 end
 
@@ -64,6 +68,37 @@ function EnemyAI.nextAttack(enemy: Enemy): (string, EnemyDefs.AttackDef)
 
 	local attackId = order[enemy.attackIndex]
 	return attackId, enemy.def.attacks[attackId]
+end
+
+-- Returns true if this damage killed the enemy.
+function EnemyAI.applyDamage(enemy: Enemy, amount: number): boolean
+	if not enemy.alive then
+		return false
+	end
+
+	enemy.health = math.max(enemy.health - amount, 0)
+	if enemy.health > 0 then
+		return false
+	end
+
+	enemy.alive = false
+	return true
+end
+
+-- Respawning in place keeps tuning iterative: kill the dummy, get another one
+-- immediately, without restarting the session. Real encounter/spawn rules
+-- arrive with the dungeon generator at build-order step 4.
+function EnemyAI.revive(enemy: Enemy)
+	enemy.health = enemy.def.maxHealth
+	enemy.alive = true
+	enemy.attackIndex = 0
+	enemy.root.Transparency = 0
+	enemy.root.Color = Color3.fromRGB(150, 60, 60)
+end
+
+function EnemyAI.markDead(enemy: Enemy)
+	enemy.root.Transparency = 0.7
+	enemy.root.Color = Color3.fromRGB(60, 60, 60)
 end
 
 return EnemyAI

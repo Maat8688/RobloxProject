@@ -21,6 +21,28 @@ function DamageMath.resolveIncoming(baseDamage: number, wasParried: boolean): nu
 	return baseDamage
 end
 
+-- Damage the player deals. The riposte window is the Assassin's parry payoff:
+-- a tight parry converts into a burst of amplified damage, which is how
+-- "skill must count as much as level/gear" is expressed for that class rather
+-- than through stat scaling.
+function DamageMath.resolveOutgoing(baseDamage: number, riposteActive: boolean, riposteMultiplier: number): number
+	if riposteActive then
+		return baseDamage * riposteMultiplier
+	end
+
+	return baseDamage
+end
+
+-- Per-class scaling of the base stagger. The Tank's payoff is control: a
+-- longer stagger opening rather than extra damage.
+function DamageMath.staggerDuration(baseDuration: number, staggerMultiplier: number): number
+	return baseDuration * staggerMultiplier
+end
+
+function DamageMath.applyHealing(currentHealth: number, maxHealth: number, healing: number): number
+	return math.clamp(currentHealth + healing, 0, maxHealth)
+end
+
 -- Flattened to the XZ plane: the slice's room is flat, and ignoring height
 -- avoids an attack whiffing because a player hopped.
 local function horizontalDistance(from: Vec2, to: Vec2): number

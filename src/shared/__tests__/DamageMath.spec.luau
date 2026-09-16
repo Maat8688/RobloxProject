@@ -23,6 +23,44 @@ describe("DamageMath.resolveIncoming", function()
 	end)
 end)
 
+describe("DamageMath.resolveOutgoing", function()
+	it("passes base damage through with no riposte", function()
+		expect(DamageMath.resolveOutgoing(6, false, 2.5)).toBe(6)
+	end)
+
+	it("amplifies damage during a riposte window", function()
+		expect(DamageMath.resolveOutgoing(6, true, 2.5)).toBe(15)
+	end)
+
+	-- Classes without a riposte payoff carry a multiplier of 1, so an active
+	-- flag must still be a no-op for them.
+	it("is a no-op for a class whose multiplier is 1", function()
+		expect(DamageMath.resolveOutgoing(12, true, 1)).toBe(12)
+	end)
+end)
+
+describe("DamageMath.staggerDuration", function()
+	it("scales the base stagger by the class multiplier", function()
+		expect(DamageMath.staggerDuration(1.5, 1.5)).toBeCloseTo(2.25, 6)
+		expect(DamageMath.staggerDuration(1.5, 0.8)).toBeCloseTo(1.2, 6)
+	end)
+
+	it("leaves the base untouched at a multiplier of 1", function()
+		expect(DamageMath.staggerDuration(1.5, 1)).toBe(1.5)
+	end)
+end)
+
+describe("DamageMath.applyHealing", function()
+	it("heals up to but not past the maximum", function()
+		expect(DamageMath.applyHealing(80, 100, 14)).toBe(94)
+		expect(DamageMath.applyHealing(95, 100, 14)).toBe(100)
+	end)
+
+	it("never returns a negative health value", function()
+		expect(DamageMath.applyHealing(5, 100, -50)).toBe(0)
+	end)
+end)
+
 describe("DamageMath.isInHitVolume range", function()
 	local function hitAt(x: number, z: number, range: number, arcDegrees: number): boolean
 		return DamageMath.isInHitVolume({

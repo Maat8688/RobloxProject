@@ -6,10 +6,14 @@
 
 ## Status
 
-Vertical slice built (Sept 2026) — build-order step 1 is code-complete and
-lints/builds clean, but **has not yet had its tuning pass**. The constants in
-`CombatConstants.luau` are first guesses, not settled values. Steps 2–10 are
-untouched.
+Build-order steps 1–2 are code-complete (Sept 2026) and lint/build clean:
+parry, hit-reg, stagger, player attacks, enemy health/death, and three
+weapon-classes with runtime switching.
+
+**Neither step has had its tuning pass.** Every number in `CombatConstants.luau`
+and `WeaponDefs.luau` is a first guess. In particular the Assassin's 80/50 ms
+window is asserted, not tested — it may be unplayable at real ping. Steps 3–10
+are untouched.
 
 ## Core loop
 
@@ -83,11 +87,48 @@ changes to them.
 - **Combat math is pure Luau**, segregated from anything touching the Roblox
   API, so it can be unit-tested. See the pure-module rule in ARCHITECTURE.md.
 
+## Decisions made building the weapon/class framework (step 2, Sept 2026)
+
+- **Class is derived, never stored.** There is no `ClassDefs` module and no
+  class field on the player — `Loadout.classOf(weaponId)` reads `classTag` off
+  the weapon. "Switching weapon switches class" is then true by construction
+  instead of by keeping two fields in sync.
+- **Everything that differentiates a class is data in `WeaponDefs`.** Adding a
+  class is adding a row, not writing code. This is deliberately a hedge against
+  the open roster question below: it costs nothing to stay open.
+- **Each class converts a parry into a different advantage** (`ParryPayoff`),
+  rather than every class parrying for the same effect with a different window
+  width. Tank buys control (1.5× stagger), Assassin buys damage (2.5× riposte
+  for 2.5s), Healer buys sustain (14hp self-heal). This is where "skill must
+  count as much as level/gear" lives per class, and a test asserts every class
+  has a non-trivial payoff so a future class can't silently skip one.
+- **Player attacks were built as part of step 2**, though the build order lists
+  them nowhere explicitly. A weapon you can't swing can't express a class: the
+  Assassin's riposte has nothing to amplify and the fast/slow attack contrast
+  that defines the classes doesn't exist. Enemy health, death and a 3s respawn
+  came with it so swings have consequences and tuning can iterate.
+- **Swings carry no client timestamp.** Unlike a parry, an attack isn't
+  reactive to a server-driven telegraph, so there's nothing to compensate for —
+  the server resolves it on its own clock and the bounded-rewind machinery
+  isn't needed.
+- **Stamina is one pool shared by parrying and swinging.** Creates a real
+  attack-or-defend tension rather than two independent budgets.
+- **Weapon swaps are blocked mid-swing**, and each swing captures its weapon at
+  windup. Otherwise a player could start a cheap fast swing and land a heavy
+  one.
+- **Number keys 1/2/3 swap weapons** as a tuning affordance only — the fastest
+  way to feel two parry windows back to back. Build-order step 6 replaces it
+  with inventory-driven equipping.
+
 ## Open / not yet decided
 
 - Is solo play fully supported, or is this group-first content? This changes
   how hard healer-necessity can be tuned.
 - Fixed class roster (Tank/Assassin/Healer/Mage/...) or open to add more later?
+  *(Still open, but no longer urgent: step 2 made classes pure data in
+  `WeaponDefs`, so adding one is a row rather than a refactor. Mage is the one
+  that will actually force the question, since "magic replaces combat" can't be
+  expressed as a weapon row alone.)*
 - PvP: does a simultaneous parry cause a clash/neutral outcome, or does one
   side win?
 

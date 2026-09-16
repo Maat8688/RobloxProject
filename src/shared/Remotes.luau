@@ -16,11 +16,16 @@ local FOLDER_NAME = "Remotes"
 local REMOTE_EVENTS = {
 	-- Client -> Server
 	"ParryAttempt",
+	"AttackRequest",
+	"EquipWeapon",
 	-- Server -> Client
 	"EnemyTelegraphStart",
 	"PlayerHit",
 	"ParryResult",
 	"EnemyStaggered",
+	"AttackResult",
+	"WeaponEquipped",
+	"EnemyHealthChanged",
 }
 
 local folder: Folder? = nil
