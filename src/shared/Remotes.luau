@@ -14,6 +14,11 @@ Remotes.Names = {
 	EnemyTelegraphStart = "EnemyTelegraphStart",
 	EnemyStateChanged = "EnemyStateChanged",
 	PlayerHit = "PlayerHit",
+	WeaponEquipped = "WeaponEquipped",
+	ChestOpened = "ChestOpened",
+	InventoryUpdated = "InventoryUpdated",
+	CurrencyUpdated = "CurrencyUpdated",
+	UpgradeResult = "UpgradeResult",
 }
 
 local FOLDER_NAME = "Remotes"

@@ -1,7 +1,9 @@
 -- One enemy instance: spawns its body in Workspace and runs its own
--- Idle -> Telegraph -> (Staggered | Recover) -> Idle loop. Generalizing this
--- into a shared EnemyAI across enemy types is build order step 3 — for the
--- vertical slice there's exactly one of these.
+-- Idle -> Telegraph -> (Staggered | Recover) -> Idle loop, picking randomly
+-- among its EnemyDefs attacks each cycle. This class is already the
+-- generalized enemy AI (build order step 3) — a separate EnemyAI.luau was
+-- planned in ARCHITECTURE.md but turned out unnecessary, since every enemy
+-- already goes through Enemy.new; see DESIGN.md's decision log.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -18,7 +20,9 @@ local playerHitRemote = Remotes.Get(Remotes.Names.PlayerHit)
 local Enemy = {}
 Enemy.__index = Enemy
 
-function Enemy.new(id, def, spawnCFrame)
+function Enemy.new(id, def, spawnCFrame, parent)
+	parent = parent or Workspace
+
 	local model = Instance.new("Model")
 	model.Name = id
 
@@ -32,18 +36,26 @@ function Enemy.new(id, def, spawnCFrame)
 	body.Parent = model
 
 	model.PrimaryPart = body
-	model.Parent = Workspace
+	model.Parent = parent
+
+	local attackIds = {}
+	for attackId in def.attacks do
+		table.insert(attackIds, attackId)
+	end
 
 	local self = setmetatable({
 		id = id,
 		def = def,
+		attackIds = attackIds,
 		state = "Idle",
 		health = def.hp,
 		model = model,
+		parent = parent,
 		pendingAttackId = nil,
 		telegraphResolveTime = nil,
 		parriedThisAttack = false,
 		spawnCFrame = spawnCFrame,
+		deathCallbacks = {},
 	}, Enemy)
 
 	task.spawn(function()
@@ -63,7 +75,7 @@ function Enemy:_beginTelegraph(attackId, attack)
 	self.parriedThisAttack = false
 	self.telegraphResolveTime = os.clock() + attack.telegraphDuration
 	self:_setState("Telegraph")
-	telegraphRemote:FireAllClients(self.id, attackId, attack.telegraphDuration)
+	telegraphRemote:FireAllClients(self.id, attackId, attack.telegraphDuration, attack.parryable)
 end
 
 function Enemy:_resolveAttack(attack)
@@ -84,7 +96,7 @@ function Enemy:_resolveAttack(attack)
 		end
 
 		local distance = (rootPart.Position - primaryPart.Position).Magnitude
-		if distance <= CombatConstants.ENEMY_ENGAGE_RANGE then
+		if distance <= attack.range then
 			local humanoid = character:FindFirstChildOfClass("Humanoid")
 			if humanoid then
 				humanoid.Health -= attack.damage
@@ -94,26 +106,39 @@ function Enemy:_resolveAttack(attack)
 	end
 end
 
-function Enemy:_applyDamage(amount)
+function Enemy:_applyDamage(amount, killer)
 	self.health = math.max(0, self.health - amount)
 
 	if self.health <= 0 then
-		self:_die()
+		self:_die(killer)
 	else
 		stateChangedRemote:FireAllClients(self.id, self.state, self.health)
 	end
 end
 
-function Enemy:_die()
+-- Callbacks run every time this enemy dies, in registration order, each
+-- receiving the player who landed the killing blow (nil if it died without
+-- one). Two independent listeners exist now — the guarded chest unlocking
+-- and the kill payout — so this is a list rather than the single slot it
+-- started as.
+function Enemy:OnDeath(callback)
+	table.insert(self.deathCallbacks, callback)
+end
+
+function Enemy:_die(killer)
 	self.health = 0
 	self:_setState("Dead")
 	self.model.Parent = nil
+
+	for _, callback in self.deathCallbacks do
+		callback(killer)
+	end
 end
 
 function Enemy:_respawn()
 	self.health = self.def.hp
 	self.model:PivotTo(self.spawnCFrame)
-	self.model.Parent = Workspace
+	self.model.Parent = self.parent
 end
 
 -- Called by CombatServer once it has already checked the attacker's swing
@@ -131,7 +156,7 @@ function Enemy:TryAttack(player, weaponDef)
 	end
 
 	local distance = (rootPart.Position - primaryPart.Position).Magnitude
-	if distance > CombatConstants.SWING_RANGE then
+	if distance > weaponDef.swingRange then
 		return
 	end
 
@@ -140,15 +165,21 @@ function Enemy:TryAttack(player, weaponDef)
 		damage *= CombatConstants.STAGGER_DAMAGE_MULTIPLIER
 	end
 
-	self:_applyDamage(damage)
+	self:_applyDamage(damage, player)
 end
 
 -- Validated using server receipt time minus half the player's round-trip
 -- ping, not the client's own clock — client and server os.clock() aren't
 -- synchronized, so a client-supplied timestamp can't be compared directly
--- against the server's telegraphResolveTime.
-function Enemy:TryParry(player)
+-- against the server's telegraphResolveTime. `parryWindow` is the equipped
+-- weapon's own window (Tank wide, Assassin tight — see WeaponDefs).
+function Enemy:TryParry(player, parryWindow)
 	if self.state ~= "Telegraph" or self.telegraphResolveTime == nil then
+		return
+	end
+
+	local pendingAttack = self.def.attacks[self.pendingAttackId]
+	if pendingAttack == nil or not pendingAttack.parryable then
 		return
 	end
 
@@ -156,7 +187,7 @@ function Enemy:TryParry(player)
 	local perceivedTime = os.clock() - halfPing
 	local delta = math.abs(perceivedTime - self.telegraphResolveTime)
 
-	if delta <= CombatConstants.PARRY_WINDOW then
+	if delta <= parryWindow then
 		self.parriedThisAttack = true
 	end
 end
@@ -174,7 +205,7 @@ function Enemy:_runLoop()
 			continue
 		end
 
-		local attackId = "Swing"
+		local attackId = self.attackIds[math.random(#self.attackIds)]
 		local attack = self.def.attacks[attackId]
 		self:_beginTelegraph(attackId, attack)
 
