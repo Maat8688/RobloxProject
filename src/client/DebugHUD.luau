@@ -6,8 +6,10 @@
 -- every attempt, next to the ping that explains it, so the constants in
 -- CombatConstants and WeaponDefs can be moved on evidence.
 --
--- The window readout follows the equipped weapon, which is the fastest way to
--- feel how far apart the Tank and Assassin profiles actually are.
+-- With several enemies winding up at once, the readout tracks the SAME attack
+-- the server would resolve a parry against — nearest impact to now, mirroring
+-- ParryMath.selectParryTarget. A HUD that highlighted a different enemy than
+-- the one the parry will hit would actively mislead a tuning session.
 --
 -- Replaced by real UI at build-order step 10.
 
@@ -37,35 +39,43 @@ local VERDICT_COLORS: { [string]: Color3 } = {
 	rejected_stale = Color3.fromRGB(255, 90, 90),
 }
 
+type Telegraph = {
+	attackId: string,
+	impactTime: number,
+	parryable: boolean,
+}
+
+type EnemyInfo = {
+	health: number,
+	maxHealth: number,
+	alive: boolean,
+}
+
 type State = {
 	weaponId: string,
 	classTag: string,
-	attackId: string?,
-	impactTime: number,
-	parryable: boolean,
+	telegraphs: { [string]: Telegraph },
+	enemies: { [string]: EnemyInfo },
 	stamina: number,
 	staminaAt: number,
 	riposteUntil: number,
 	lastVerdict: string?,
 	lastDeltaMs: number,
-	enemyHealth: number,
-	enemyMaxHealth: number,
+	lastParryEnemy: string?,
 	lastSwing: string?,
 }
 
 local state: State = {
 	weaponId = Loadout.DEFAULT_WEAPON,
 	classTag = Loadout.classOf(Loadout.DEFAULT_WEAPON),
-	attackId = nil,
-	impactTime = 0,
-	parryable = true,
+	telegraphs = {},
+	enemies = {},
 	stamina = CombatConstants.MAX_STAMINA,
 	staminaAt = 0,
 	riposteUntil = 0,
 	lastVerdict = nil,
 	lastDeltaMs = 0,
-	enemyHealth = 0,
-	enemyMaxHealth = 0,
+	lastParryEnemy = nil,
 	lastSwing = nil,
 }
 
@@ -82,6 +92,26 @@ local function makeLabel(parent: Instance, order: number, size: number): TextLab
 	return label
 end
 
+-- Same rule the server uses to pick a parry target, so the HUD and the
+-- authority never disagree about what you're about to parry.
+local function soonestTelegraph(now: number): (string?, Telegraph?)
+	local candidates: { ParryMath.ParryCandidate } = {}
+	for enemyId, telegraph in state.telegraphs do
+		table.insert(candidates, {
+			enemyId = enemyId,
+			impactTime = telegraph.impactTime,
+			parryable = telegraph.parryable,
+		})
+	end
+
+	local best = ParryMath.selectParryTarget(candidates, now)
+	if not best then
+		return nil, nil
+	end
+
+	return best.enemyId, state.telegraphs[best.enemyId]
+end
+
 function DebugHUD.start()
 	local player = Players.LocalPlayer
 
@@ -92,7 +122,7 @@ function DebugHUD.start()
 	gui.Parent = player:WaitForChild("PlayerGui")
 
 	local frame = Instance.new("Frame")
-	frame.Size = UDim2.fromOffset(360, 250)
+	frame.Size = UDim2.fromOffset(400, 250)
 	frame.Position = UDim2.fromOffset(16, 16)
 	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 	frame.BackgroundTransparency = 0.25
@@ -111,11 +141,11 @@ function DebugHUD.start()
 	layout.Parent = frame
 
 	local classLabel = makeLabel(frame, 1, 15)
-	local attackLabel = makeLabel(frame, 2, 15)
+	local targetLabel = makeLabel(frame, 2, 15)
 	local countdownLabel = makeLabel(frame, 3, 15)
 	local windowLabel = makeLabel(frame, 4, 13)
 	local staminaLabel = makeLabel(frame, 5, 13)
-	local enemyLabel = makeLabel(frame, 6, 13)
+	local roomLabel = makeLabel(frame, 6, 13)
 	local pingLabel = makeLabel(frame, 7, 13)
 	local swingLabel = makeLabel(frame, 8, 14)
 	local resultLabel = makeLabel(frame, 9, 20)
@@ -126,29 +156,36 @@ function DebugHUD.start()
 	end)
 
 	Remotes.get("EnemyTelegraphStart").OnClientEvent:Connect(function(payload)
-		state.attackId = payload.attackId
-		state.impactTime = payload.impactTime
-		state.parryable = payload.parryable
+		state.telegraphs[payload.enemyId] = {
+			attackId = payload.attackId,
+			impactTime = payload.impactTime,
+			parryable = payload.parryable,
+		}
 	end)
 
 	Remotes.get("ParryResult").OnClientEvent:Connect(function(payload)
 		state.lastVerdict = payload.verdict
 		state.lastDeltaMs = payload.deltaMs
+		state.lastParryEnemy = payload.enemyId
 		-- Authoritative values; the readout predicts forward from here.
 		state.stamina = payload.stamina
 		state.staminaAt = Workspace:GetServerTimeNow()
 		state.riposteUntil = payload.riposteUntil or 0
 	end)
 
-	Remotes.get("EnemyStaggered").OnClientEvent:Connect(function()
-		state.attackId = nil
+	Remotes.get("EnemyStaggered").OnClientEvent:Connect(function(payload)
+		state.telegraphs[payload.enemyId] = nil
 	end)
 
 	Remotes.get("EnemyHealthChanged").OnClientEvent:Connect(function(payload)
-		state.enemyHealth = payload.health
-		state.enemyMaxHealth = payload.maxHealth
+		state.enemies[payload.enemyId] = {
+			health = payload.health,
+			maxHealth = payload.maxHealth,
+			alive = payload.alive,
+		}
+
 		if not payload.alive then
-			state.attackId = nil
+			state.telegraphs[payload.enemyId] = nil
 		end
 	end)
 
@@ -176,33 +213,31 @@ function DebugHUD.start()
 
 		classLabel.Text = `class    {state.classTag}  ({weapon.displayName})   [1/2/3]`
 
-		if state.attackId then
-			local kind = if state.parryable then "PARRYABLE" else "UNPARRYABLE"
-			attackLabel.Text = `attack   {state.attackId}  [{kind}]`
-			attackLabel.TextColor3 = if state.parryable
+		local targetId, telegraph = soonestTelegraph(now)
+
+		if targetId and telegraph then
+			local kind = if telegraph.parryable then "PARRYABLE" else "UNPARRYABLE"
+			targetLabel.Text = `target   {targetId}  {telegraph.attackId}  [{kind}]`
+			targetLabel.TextColor3 = if telegraph.parryable
 				then Color3.fromRGB(235, 235, 235)
 				else Color3.fromRGB(255, 140, 60)
 
-			local remaining = (state.impactTime - now) * 1000
+			local remaining = (telegraph.impactTime - now) * 1000
 			countdownLabel.Text = string.format("impact   %+.0f ms", remaining)
-
-			-- Absolute bounds of the window, so you can see exactly where the
-			-- press needed to land relative to the countdown above.
-			windowLabel.Text = string.format(
-				"window   %+.0f ms .. %+.0f ms   (%.0f ms wide)",
-				-profile.earlyTolerance * 1000,
-				profile.lateTolerance * 1000,
-				(profile.earlyTolerance + profile.lateTolerance) * 1000
-			)
 		else
-			attackLabel.Text = "attack   idle"
-			attackLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+			targetLabel.Text = "target   none incoming"
+			targetLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
 			countdownLabel.Text = "impact   --"
-			windowLabel.Text = string.format(
-				"window   %.0f ms wide",
-				(profile.earlyTolerance + profile.lateTolerance) * 1000
-			)
 		end
+
+		-- Absolute bounds of the window, so you can see exactly where the
+		-- press needed to land relative to the countdown above.
+		windowLabel.Text = string.format(
+			"window   %+.0f ms .. %+.0f ms   (%.0f ms wide)",
+			-profile.earlyTolerance * 1000,
+			profile.lateTolerance * 1000,
+			(profile.earlyTolerance + profile.lateTolerance) * 1000
+		)
 
 		local predicted = ParryMath.regenerateStamina(state.stamina, now - state.staminaAt)
 		staminaLabel.Text = string.format(
@@ -213,11 +248,17 @@ function DebugHUD.start()
 			weapon.attack.staminaCost
 		)
 
-		if state.enemyMaxHealth > 0 then
-			enemyLabel.Text = string.format("enemy    %d / %d hp", state.enemyHealth, state.enemyMaxHealth)
-		else
-			enemyLabel.Text = "enemy    --"
+		local alive, total, winding = 0, 0, 0
+		for _, info in state.enemies do
+			total += 1
+			if info.alive then
+				alive += 1
+			end
 		end
+		for _ in state.telegraphs do
+			winding += 1
+		end
+		roomLabel.Text = string.format("room     %d/%d alive   %d winding up", alive, total, winding)
 
 		-- Ping is here because it explains late verdicts and bounds how much of
 		-- STRIKE_RESOLUTION_GRACE a real player actually gets to use.
@@ -234,7 +275,13 @@ function DebugHUD.start()
 		end
 
 		if state.lastVerdict then
-			resultLabel.Text = string.format("%s  %+.0f ms", string.upper(state.lastVerdict), state.lastDeltaMs)
+			local against = if state.lastParryEnemy then `  vs {state.lastParryEnemy}` else ""
+			resultLabel.Text = string.format(
+				"%s  %+.0f ms%s",
+				string.upper(state.lastVerdict),
+				state.lastDeltaMs,
+				against
+			)
 			resultLabel.TextColor3 = VERDICT_COLORS[state.lastVerdict] or Color3.fromRGB(235, 235, 235)
 		else
 			resultLabel.Text = "F parry / click attack"

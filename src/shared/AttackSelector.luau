@@ -1,0 +1,112 @@
+--!strict
+-- Enemy decision-making: which attack to use, and whether to move.
+-- Pure Luau — no Roblox API, no instances, no randomness it doesn't receive.
+--
+-- This is the "generalized across enemy types" half of build-order step 3.
+-- There are no per-enemy branches here: a charging melee type and a kiting
+-- ranged type differ only in the numbers they bring. If a new enemy needs a
+-- branch in this file, that's a sign the behaviour belongs in EnemyDefs as
+-- data instead.
+
+local EnemyDefs = require(script.Parent.EnemyDefs)
+
+local AttackSelector = {}
+
+-- Dead band around preferredRange. Without it an enemy sitting almost exactly
+-- at its preferred distance flips between approach and retreat every tick and
+-- visibly shuffles on the spot.
+local HOLD_TOLERANCE = 2
+
+export type MovementIntent = "approach" | "retreat" | "hold" | "idle"
+
+-- Cooldown bookkeeping is passed in rather than held here, so this stays pure
+-- and the caller owns all enemy state.
+export type CooldownMap = { [string]: number }
+
+function AttackSelector.movementIntent(def: EnemyDefs.EnemyDef, distance: number): MovementIntent
+	if distance > def.aggroRange then
+		return "idle"
+	end
+
+	if def.moveSpeed <= 0 then
+		return "hold"
+	end
+
+	if distance > def.preferredRange + HOLD_TOLERANCE then
+		return "approach"
+	end
+
+	if distance < def.preferredRange - HOLD_TOLERANCE then
+		return "retreat"
+	end
+
+	return "hold"
+end
+
+-- Attacks legal right now: in band, and off cooldown. Returned sorted so the
+-- weighted pick below is reproducible for a given rng sequence — otherwise
+-- table iteration order would make tuning sessions non-repeatable.
+function AttackSelector.legalAttacks(
+	def: EnemyDefs.EnemyDef,
+	distance: number,
+	cooldowns: CooldownMap,
+	now: number
+): { string }
+	local legal = {}
+
+	for attackId, attack in def.attacks do
+		local inBand = distance >= attack.minRange and distance <= attack.maxRange
+		local ready = now >= (cooldowns[attackId] or 0)
+
+		if inBand and ready then
+			table.insert(legal, attackId)
+		end
+	end
+
+	table.sort(legal)
+	return legal
+end
+
+export type Rng = () -> number
+
+-- Weighted pick among the legal attacks. Returns nil when the enemy has
+-- nothing it can legally do, which the caller reads as "wait and reposition"
+-- rather than as an error — it's the normal state for a ranged enemy that has
+-- been walked down.
+function AttackSelector.chooseAttack(
+	def: EnemyDefs.EnemyDef,
+	distance: number,
+	cooldowns: CooldownMap,
+	now: number,
+	rng: Rng?
+): string?
+	local legal = AttackSelector.legalAttacks(def, distance, cooldowns, now)
+	if #legal == 0 then
+		return nil
+	end
+
+	local totalWeight = 0
+	for _, attackId in legal do
+		totalWeight += def.attacks[attackId].weight
+	end
+
+	if totalWeight <= 0 then
+		return legal[1]
+	end
+
+	local roll = (rng or math.random)() * totalWeight
+	local cumulative = 0
+
+	for _, attackId in legal do
+		cumulative += def.attacks[attackId].weight
+		if roll < cumulative then
+			return attackId
+		end
+	end
+
+	-- Only reachable through floating-point drift when roll lands on the very
+	-- top of the range; the last legal attack is the correct answer there.
+	return legal[#legal]
+end
+
+return AttackSelector

@@ -6,14 +6,17 @@
 
 ## Status
 
-Build-order steps 1–2 are code-complete (Sept 2026) and lint/build clean:
-parry, hit-reg, stagger, player attacks, enemy health/death, and three
-weapon-classes with runtime switching.
+Build-order steps 1–3 are code-complete (Sept 2026) and lint/build clean:
+parry, hit-reg, stagger, player attacks, enemy health/death, three
+weapon-classes with runtime switching, and three enemy types driven by a
+generalized data-only AI.
 
-**Neither step has had its tuning pass.** Every number in `CombatConstants.luau`
-and `WeaponDefs.luau` is a first guess. In particular the Assassin's 80/50 ms
-window is asserted, not tested — it may be unplayable at real ping. Steps 3–10
-are untouched.
+**None of it has had a tuning pass.** Every number in `CombatConstants.luau`,
+`WeaponDefs.luau` and `EnemyDefs.luau` is a first guess. Two in particular are
+asserted rather than tested: the Assassin's 80/50 ms window may be unplayable
+at real ping, and three simultaneous enemies may simply be unreadable — the
+parry system has only ever been designed against one telegraph at a time.
+Steps 4–10 are untouched.
 
 ## Core loop
 
@@ -119,6 +122,36 @@ changes to them.
 - **Number keys 1/2/3 swap weapons** as a tuning affordance only — the fastest
   way to feel two parry windows back to back. Build-order step 6 replaces it
   with inventory-driven equipping.
+
+## Decisions made generalizing enemy AI (step 3, Sept 2026)
+
+- **Enemy behaviour is data, not code.** `AttackSelector` has no per-enemy
+  branches: an enemy is its attack bands, its `preferredRange`, and its
+  weights. The Spitter kites purely because its preferred range sits outside
+  its own melee — there is no kiting code. A new enemy needing a branch in
+  `AttackSelector` means the behaviour should have been data.
+- **A parry resolves against whichever attack lands nearest the press**, and
+  the client never names a target. The rejected alternative was "nearest
+  *parryable* attack": that would silently redirect a parry away from an
+  unparryable attack about to hit you, so the miss teaches nothing and reading
+  which attack lands first stops mattering — which is the skill the telegraph
+  system exists to test. Tested in `ParryMath.selectParryTarget`.
+- **One state machine and one loop per enemy**, so a staggered Shambler doesn't
+  hold up a Spitter across the room. Movement is stepped for all enemies on a
+  single Heartbeat so they share a frame delta.
+- **An enemy mid-windup cannot reposition.** Letting it drift during the
+  telegraph makes the parry beat unreadable, so the wind-up is a commitment for
+  the enemy as much as for the player.
+- **Enemies move by stepping an anchored part's CFrame**, not via Humanoid
+  pathfinding. The rigs are single parts and this keeps hit-reg reading exactly
+  the positions the AI reasoned about. Revisit at step 4, when there are walls
+  worth pathing around.
+- **Player swings hit one target**, the nearest in the volume. Cleave is a
+  weapon property that doesn't exist yet, and giving it away free would
+  trivialise multi-enemy fights the moment they arrived.
+- **Every enemy must have at least one parryable attack**, asserted by a test.
+  Otherwise a future enemy could silently opt out of the parry system
+  altogether, which would quietly erode "skill must count".
 
 ## Open / not yet decided
 

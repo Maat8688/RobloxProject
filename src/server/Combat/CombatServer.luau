@@ -1,11 +1,12 @@
 --!strict
--- The authority. Owns the enemy state machine, validates every parry and every
--- swing, and is the only place damage or healing is applied.
+-- The authority. Owns every enemy's state machine, validates every parry and
+-- every swing, and is the only place damage or healing is applied.
 --
 -- The client's inputs are a parry timestamp, a swing request, and a weapon id.
 -- All three are treated as untrusted: the timestamp is bounded-rewound, the
 -- swing is resolved against server-side positions, and the weapon id is
--- checked against the definition table.
+-- checked against the definition table. Notably the client never names which
+-- enemy it is parrying or swinging at — the server resolves both.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -24,7 +25,7 @@ local EnemyAI = require(script.Parent.EnemyAI)
 
 local CombatServer = {}
 
--- How long a killed dummy stays down before coming back, so tuning can carry
+-- How long a killed enemy stays down before coming back, so tuning can carry
 -- on without restarting the session.
 local RESPAWN_DELAY = 3
 
@@ -40,9 +41,9 @@ type PlayerState = {
 }
 
 type ActiveAttack = {
+	enemyId: string,
 	attackId: string,
 	def: EnemyDefs.AttackDef,
-	startTime: number,
 	impactTime: number,
 	-- Set the instant a parry is validated, which interrupts the strike before
 	-- it resolves.
@@ -54,8 +55,9 @@ type ActiveAttack = {
 }
 
 local playerStates: { [Player]: PlayerState } = {}
-local enemy: EnemyAI.Enemy? = nil
-local activeAttack: ActiveAttack? = nil
+local enemies: { [string]: EnemyAI.Enemy } = {}
+-- Keyed by enemyId: at most one wind-up per enemy, but many across the room.
+local activeAttacks: { [string]: ActiveAttack } = {}
 local encounterRunning = false
 
 local function getPlayerState(player: Player): PlayerState
@@ -107,26 +109,49 @@ local function getHumanoid(player: Player): Humanoid?
 	return character:FindFirstChildOfClass("Humanoid")
 end
 
-local function broadcastEnemyHealth(target: EnemyAI.Enemy)
+local function isAlive(player: Player): boolean
+	local humanoid = getHumanoid(player)
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+-- Nearest living player, used both for enemy targeting and for deciding
+-- whether an enemy has anyone to act on at all.
+local function getNearestPlayer(position: Vector3): (Player?, number)
+	local nearest: Player? = nil
+	local nearestDistance = math.huge
+
+	for _, player in Players:GetPlayers() do
+		local root = getCharacterRoot(player)
+		if not root or not isAlive(player) then
+			continue
+		end
+
+		local offset = root.Position - position
+		local distance = Vector3.new(offset.X, 0, offset.Z).Magnitude
+		if distance < nearestDistance then
+			nearest = player
+			nearestDistance = distance
+		end
+	end
+
+	return nearest, nearestDistance
+end
+
+local function broadcastEnemyHealth(enemy: EnemyAI.Enemy)
 	Remotes.get("EnemyHealthChanged"):FireAllClients({
-		enemyId = target.id,
-		health = target.health,
-		maxHealth = target.def.maxHealth,
-		alive = target.alive,
+		enemyId = enemy.id,
+		health = enemy.health,
+		maxHealth = enemy.def.maxHealth,
+		alive = enemy.alive,
 	})
 end
 
 --[[ Enemy attacks ]]
 
-local function resolveStrike(attack: ActiveAttack)
-	local currentEnemy = enemy
-	if not currentEnemy then
-		return
-	end
-
+local function resolveStrike(enemy: EnemyAI.Enemy, attack: ActiveAttack)
 	local playerHit = Remotes.get("PlayerHit")
-	local attackerPos = toVec2(currentEnemy.root.Position)
-	local attackerFacing = toVec2(currentEnemy.root.CFrame.LookVector)
+	local attackerPos = toVec2(enemy.root.Position)
+	local attackerFacing = toVec2(enemy.root.CFrame.LookVector)
 
 	for _, player in Players:GetPlayers() do
 		local root = getCharacterRoot(player)
@@ -161,7 +186,7 @@ local function resolveStrike(attack: ActiveAttack)
 
 		playerHit:FireClient(player, {
 			amount = damage,
-			sourceId = currentEnemy.id,
+			sourceId = enemy.id,
 			attackId = attack.attackId,
 		})
 	end
@@ -180,25 +205,28 @@ local function waitUntilOrInterrupted(deadline: number, attack: ActiveAttack): b
 	return attack.parried
 end
 
-local function runAttack(currentEnemy: EnemyAI.Enemy)
-	local attackId, attackDef = EnemyAI.nextAttack(currentEnemy)
-
+local function runAttack(enemy: EnemyAI.Enemy, attackId: string)
+	local attackDef = enemy.def.attacks[attackId]
 	local now = Workspace:GetServerTimeNow()
+
 	local attack: ActiveAttack = {
+		enemyId = enemy.id,
 		attackId = attackId,
 		def = attackDef,
-		startTime = now,
 		impactTime = now + attackDef.telegraphDuration,
 		parried = false,
 		parriedBy = nil,
 		staggerDuration = CombatConstants.STAGGER_DURATION,
 	}
-	activeAttack = attack
+
+	activeAttacks[enemy.id] = attack
+	enemy.state = "telegraph"
+	EnemyAI.markAttackUsed(enemy, attackId, now)
 
 	-- The client needs impactTime, not just the duration, so its countdown
 	-- stays correct even if this message is delayed in transit.
 	Remotes.get("EnemyTelegraphStart"):FireAllClients({
-		enemyId = currentEnemy.id,
+		enemyId = enemy.id,
 		attackId = attackId,
 		duration = attackDef.telegraphDuration,
 		impactTime = attack.impactTime,
@@ -210,19 +238,53 @@ local function runAttack(currentEnemy: EnemyAI.Enemy)
 	local interrupted =
 		waitUntilOrInterrupted(attack.impactTime + CombatConstants.STRIKE_RESOLUTION_GRACE, attack)
 
-	if interrupted then
-		Remotes.get("EnemyStaggered"):FireAllClients({
-			enemyId = currentEnemy.id,
-			duration = attack.staggerDuration,
-		})
-		activeAttack = nil
-		task.wait(attack.staggerDuration)
+	activeAttacks[enemy.id] = nil
+
+	if not enemy.alive then
 		return
 	end
 
-	resolveStrike(attack)
-	activeAttack = nil
-	task.wait(CombatConstants.RECOVER_DURATION)
+	if interrupted then
+		enemy.state = "staggered"
+		Remotes.get("EnemyStaggered"):FireAllClients({
+			enemyId = enemy.id,
+			duration = attack.staggerDuration,
+		})
+		task.wait(attack.staggerDuration)
+	else
+		resolveStrike(enemy, attack)
+		task.wait(CombatConstants.RECOVER_DURATION)
+	end
+
+	if enemy.alive then
+		enemy.state = "idle"
+	end
+end
+
+-- One loop per enemy, so a staggered Shambler doesn't hold up a Spitter across
+-- the room. Each loop only ever touches its own enemy's state.
+local function runEnemyLoop(enemy: EnemyAI.Enemy)
+	while encounterRunning do
+		task.wait(enemy.def.attackInterval)
+
+		if not encounterRunning then
+			break
+		end
+
+		if not enemy.alive or enemy.state ~= "idle" then
+			continue
+		end
+
+		local target, distance = getNearestPlayer(enemy.root.Position)
+		if not target or distance > enemy.def.aggroRange then
+			continue
+		end
+
+		local attackId = EnemyAI.chooseAttack(enemy, distance, Workspace:GetServerTimeNow())
+		if attackId then
+			runAttack(enemy, attackId)
+		end
+	end
 end
 
 --[[ Player input ]]
@@ -252,53 +314,82 @@ local function onEquipWeapon(player: Player, payload: unknown)
 	})
 end
 
+-- Nearest enemy inside the swing volume. Swings hit one target: cleave across
+-- a group is a weapon property that doesn't exist yet, and giving it away free
+-- would quietly trivialise multi-enemy fights the moment they arrived.
+local function findSwingTarget(root: BasePart, attack: { range: number, arcDegrees: number }): EnemyAI.Enemy?
+	local attackerPos = toVec2(root.Position)
+	local attackerFacing = toVec2(root.CFrame.LookVector)
+
+	local best: EnemyAI.Enemy? = nil
+	local bestDistance = math.huge
+
+	for _, enemy in enemies do
+		if not enemy.alive then
+			continue
+		end
+
+		local inVolume = DamageMath.isInHitVolume({
+			attackerPos = attackerPos,
+			attackerFacing = attackerFacing,
+			targetPos = toVec2(enemy.root.Position),
+			range = attack.range,
+			arcDegrees = attack.arcDegrees,
+		})
+
+		if not inVolume then
+			continue
+		end
+
+		local distance = (enemy.root.Position - root.Position).Magnitude
+		if distance < bestDistance then
+			best = enemy
+			bestDistance = distance
+		end
+	end
+
+	return best
+end
+
 local function resolveSwing(player: Player, state: PlayerState, weaponId: string)
 	state.swinging = false
 
-	local currentEnemy = enemy
 	local attackResult = Remotes.get("AttackResult")
-	local def = Loadout.getDef(weaponId).attack
-	local payoff = Loadout.getDef(weaponId).payoff
+	local weapon = Loadout.getDef(weaponId)
 
 	local root = getCharacterRoot(player)
-	if not root or not currentEnemy or not currentEnemy.alive then
+	if not root then
 		attackResult:FireClient(player, { hit = false, reason = "no_target", damage = 0, riposte = false })
 		return
 	end
 
-	local inVolume = DamageMath.isInHitVolume({
-		attackerPos = toVec2(root.Position),
-		attackerFacing = toVec2(root.CFrame.LookVector),
-		targetPos = toVec2(currentEnemy.root.Position),
-		range = def.range,
-		arcDegrees = def.arcDegrees,
-	})
-
-	if not inVolume then
+	local target = findSwingTarget(root, weapon.attack)
+	if not target then
 		attackResult:FireClient(player, { hit = false, reason = "missed", damage = 0, riposte = false })
 		return
 	end
 
 	local now = Workspace:GetServerTimeNow()
 	local riposteActive = now < state.riposteUntil
-	local damage = DamageMath.resolveOutgoing(def.damage, riposteActive, payoff.riposteMultiplier)
+	local damage = DamageMath.resolveOutgoing(weapon.attack.damage, riposteActive, weapon.payoff.riposteMultiplier)
 
-	local killed = EnemyAI.applyDamage(currentEnemy, damage)
+	local killed = EnemyAI.applyDamage(target, damage)
 
 	attackResult:FireClient(player, {
 		hit = true,
 		reason = "hit",
 		damage = damage,
 		riposte = riposteActive,
+		enemyId = target.id,
 	})
-	broadcastEnemyHealth(currentEnemy)
+	broadcastEnemyHealth(target)
 
 	if killed then
-		EnemyAI.markDead(currentEnemy)
+		EnemyAI.markDead(target)
 		task.delay(RESPAWN_DELAY, function()
-			if currentEnemy == enemy and encounterRunning then
-				EnemyAI.revive(currentEnemy)
-				broadcastEnemyHealth(currentEnemy)
+			if encounterRunning and enemies[target.id] == target then
+				EnemyAI.revive(target)
+				broadcastEnemyHealth(target)
 			end
 		end)
 	end
@@ -335,6 +426,23 @@ local function onAttackRequest(player: Player)
 	end)
 end
 
+-- Every wind-up currently in flight, as parry candidates. Built fresh per
+-- attempt rather than cached, because an attack can resolve between two
+-- presses.
+local function collectParryCandidates(): { ParryMath.ParryCandidate }
+	local candidates = {}
+
+	for _, attack in activeAttacks do
+		table.insert(candidates, {
+			enemyId = attack.enemyId,
+			impactTime = attack.impactTime,
+			parryable = attack.def.parryable,
+		})
+	end
+
+	return candidates
+end
+
 local function onParryAttempt(player: Player, payload: unknown)
 	-- Remote payloads are client-controlled: validate shape before touching it.
 	if typeof(payload) ~= "table" then
@@ -353,19 +461,20 @@ local function onParryAttempt(player: Player, payload: unknown)
 	local parryResult = Remotes.get("ParryResult")
 	local weapon = Loadout.getDef(state.weaponId)
 
-	local function respond(verdict: string, success: boolean, deltaMs: number)
+	local function respond(verdict: string, success: boolean, deltaMs: number, enemyId: string?)
 		parryResult:FireClient(player, {
 			verdict = verdict,
 			success = success,
 			deltaMs = deltaMs,
 			stamina = state.stamina,
 			riposteUntil = state.riposteUntil,
+			enemyId = enemyId,
 		})
 	end
 
 	local readiness = ParryMath.checkReadiness(state.stamina, state.lockoutUntil, now)
 	if not readiness.allowed then
-		respond(readiness.reason :: string, false, 0)
+		respond(readiness.reason :: string, false, 0, nil)
 		return
 	end
 
@@ -373,12 +482,21 @@ local function onParryAttempt(player: Player, payload: unknown)
 	-- success. Parrying on a read has to be a decision, not a free roll.
 	state.stamina -= CombatConstants.PARRY_STAMINA_COST
 
-	local attack = activeAttack
-	if not attack then
+	-- The server picks which incoming attack this press is aimed at; the client
+	-- never names a target.
+	local candidate = ParryMath.selectParryTarget(collectParryCandidates(), attemptTime)
+	if not candidate then
 		-- Nothing incoming: treat as a whiff so blind mashing still burns
 		-- stamina and eats the lockout.
 		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
-		respond("no_attack", false, 0)
+		respond("no_attack", false, 0, nil)
+		return
+	end
+
+	local attack = activeAttacks[candidate.enemyId]
+	if not attack then
+		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
+		respond("no_attack", false, 0, nil)
 		return
 	end
 
@@ -412,12 +530,12 @@ local function onParryAttempt(player: Player, payload: unknown)
 		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
 	end
 
-	respond(evaluation.verdict, evaluation.success, evaluation.deltaMs)
+	respond(evaluation.verdict, evaluation.success, evaluation.deltaMs, attack.enemyId)
 end
 
 --[[ Lifecycle ]]
 
-function CombatServer.start(enemySpawn: Vector3, playerSpawn: Vector3)
+function CombatServer.start(spawns: { { defId: string, position: Vector3 } }, playerSpawn: Vector3)
 	assert(not encounterRunning, "CombatServer.start called twice")
 
 	Remotes.get("ParryAttempt").OnServerEvent:Connect(onParryAttempt)
@@ -436,21 +554,32 @@ function CombatServer.start(enemySpawn: Vector3, playerSpawn: Vector3)
 			weaponId = state.weaponId,
 			classTag = Loadout.classOf(state.weaponId),
 		})
+
+		for _, enemy in enemies do
+			broadcastEnemyHealth(enemy)
+		end
 	end)
 
-	local spawned = EnemyAI.spawn("TrainingDummy", enemySpawn, playerSpawn)
-	enemy = spawned
 	encounterRunning = true
 
-	task.spawn(function()
-		while encounterRunning do
-			task.wait(spawned.def.attackInterval)
-			if not encounterRunning then
-				break
-			end
-			-- A dead dummy stops swinging until it respawns.
-			if spawned.alive then
-				runAttack(spawned)
+	for _, spawn in spawns do
+		local enemy = EnemyAI.spawn(spawn.defId, spawn.position, playerSpawn)
+		enemies[enemy.id] = enemy
+		task.spawn(runEnemyLoop, enemy)
+	end
+
+	-- Movement steps every enemy on one Heartbeat rather than inside each
+	-- enemy's own loop, so they all move against the same frame delta.
+	RunService.Heartbeat:Connect(function(deltaTime)
+		if not encounterRunning then
+			return
+		end
+
+		for _, enemy in enemies do
+			local target = getNearestPlayer(enemy.root.Position)
+			local root = if target then getCharacterRoot(target) else nil
+			if root then
+				EnemyAI.step(enemy, root.Position, deltaTime)
 			end
 		end
 	end)

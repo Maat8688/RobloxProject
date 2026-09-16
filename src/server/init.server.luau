@@ -1,5 +1,5 @@
 --!strict
--- Vertical slice bootstrap: build the room, spawn the enemy, start combat.
+-- Combat sandbox bootstrap: build the room, spawn the roster, start combat.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +12,16 @@ local RoomBuilder = require(script.Dungeon.RoomBuilder)
 Remotes.init()
 
 local room = RoomBuilder.build()
+
+-- One of each type, spread out so their different movement rules are visible
+-- from the player spawn: the dummy holds, the Shambler closes, the Spitter
+-- backs off to its preferred range. Encounter composition becomes the dungeon
+-- generator's job at build-order step 4.
+local roster = {
+	{ defId = "TrainingDummy", position = room.enemySpawn },
+	{ defId = "Shambler", position = room.enemySpawn + Vector3.new(-18, 0, -6) },
+	{ defId = "Spitter", position = room.enemySpawn + Vector3.new(18, 0, 4) },
+}
 
 -- Drop players into the room rather than wherever the empty baseplate would
 -- put them.
@@ -29,4 +39,4 @@ Players.PlayerAdded:Connect(function(player)
 	end
 end)
 
-CombatServer.start(room.enemySpawn, room.playerSpawn)
+CombatServer.start(roster, room.playerSpawn)

@@ -133,6 +133,53 @@ describe("ParryMath.evaluate unparryable attacks", function()
 	end)
 end)
 
+describe("ParryMath.selectParryTarget", function()
+	it("returns nil when nothing is incoming", function()
+		expect(ParryMath.selectParryTarget({}, NOW)).toBeNil()
+	end)
+
+	it("picks the attack landing nearest the press", function()
+		local target = ParryMath.selectParryTarget({
+			{ enemyId = "Shambler_2", impactTime = NOW + 0.8, parryable = true },
+			{ enemyId = "Spitter_3", impactTime = NOW + 0.05, parryable = true },
+			{ enemyId = "TrainingDummy_1", impactTime = NOW + 1.4, parryable = true },
+		}, NOW)
+
+		expect(target).never.toBeNil()
+		expect((target :: any).enemyId).toBe("Spitter_3")
+	end)
+
+	it("counts an attack that has just passed as nearer than a distant one", function()
+		local target = ParryMath.selectParryTarget({
+			{ enemyId = "Shambler_2", impactTime = NOW - 0.02, parryable = true },
+			{ enemyId = "Spitter_3", impactTime = NOW + 0.9, parryable = true },
+		}, NOW)
+
+		expect((target :: any).enemyId).toBe("Shambler_2")
+	end)
+
+	-- Deliberate: if the thing about to hit you is unparryable, the parry must
+	-- fail against it rather than quietly redirecting to a parryable attack
+	-- elsewhere. Otherwise reading which attack lands first stops mattering.
+	it("does not skip an unparryable attack in favour of a parryable one", function()
+		local target = ParryMath.selectParryTarget({
+			{ enemyId = "Spitter_3", impactTime = NOW + 0.05, parryable = false },
+			{ enemyId = "Shambler_2", impactTime = NOW + 0.3, parryable = true },
+		}, NOW)
+
+		expect((target :: any).enemyId).toBe("Spitter_3")
+		expect((target :: any).parryable).toBe(false)
+	end)
+
+	it("handles a single candidate", function()
+		local target = ParryMath.selectParryTarget({
+			{ enemyId = "Shambler_2", impactTime = NOW + 5, parryable = true },
+		}, NOW)
+
+		expect((target :: any).enemyId).toBe("Shambler_2")
+	end)
+end)
+
 describe("ParryMath.checkReadiness", function()
 	it("allows a parry with full stamina and no lockout", function()
 		local readiness = ParryMath.checkReadiness(CombatConstants.MAX_STAMINA, 0, NOW)

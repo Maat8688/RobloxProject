@@ -27,8 +27,9 @@ src/shared/          -> ReplicatedStorage.Shared
   ParryMath.luau         -- parry window + timestamp validation (pure)
   DamageMath.luau        -- damage resolution + hit-reg geometry (pure)
   WeaponDefs.luau        -- weaponId -> class, parry profile, attack, payoff
-  EnemyDefs.luau         -- enemyId -> stats, attack timelines
+  EnemyDefs.luau         -- enemyId -> stats, movement, attack timelines
   Loadout.luau           -- equip validation + class-from-weapon derivation
+  AttackSelector.luau    -- enemy attack choice + movement intent (pure)
   Remotes.luau           -- every RemoteEvent/RemoteFunction is created here,
                          -- nothing created ad hoc elsewhere
   LootTables.luau        -- (planned) encounterGroupId -> possible drops
@@ -59,7 +60,7 @@ tests/               -> mounted only by test.project.json, never shipped
 ```
 
 **Pure-module rule.** `CombatConstants`, `ParryMath`, `DamageMath`, `WeaponDefs`,
-`EnemyDefs` and `Loadout` must not call any Roblox API. That is what keeps the combat math
+`EnemyDefs`, `Loadout` and `AttackSelector` must not call any Roblox API. That is what keeps the combat math
 unit-testable, and it is what will let a headless Lune CI tier run the same
 specs without a rewrite. Anything needing `game`, `workspace` or `Instance`
 belongs in the server or client layer, not in these five files.
@@ -71,7 +72,7 @@ belongs in the server or client layer, not in these five files.
 | `ParryAttempt` | Client → Server | `{ timestamp }` | Player attempts a parry. `timestamp` is `workspace:GetServerTimeNow()` on the client |
 | `EnemyTelegraphStart` | Server → Client | `{ enemyId, attackId, duration, impactTime, parryable }` | Attack is winding up — VFX/audio cue. `impactTime` is absolute so a delayed packet doesn't shift the cue |
 | `PlayerHit` | Server → Client | `{ amount, sourceId, attackId }` | Damage feedback |
-| `ParryResult` | Server → Client | `{ verdict, success, deltaMs, stamina, riposteUntil }` | Parry outcome. `deltaMs` is signed distance from impact, for HUD tuning |
+| `ParryResult` | Server → Client | `{ verdict, success, deltaMs, stamina, riposteUntil, enemyId }` | Parry outcome. `deltaMs` is signed distance from impact, for HUD tuning. `enemyId` is which attack the server resolved the press against |
 | `EnemyStaggered` | Server → Client | `{ enemyId, duration }` | Enemy interrupted by a successful parry. `duration` is already scaled by the parrying class's payoff |
 | `AttackRequest` | Client → Server | *(none)* | Player swings. Carries no timestamp — a swing isn't reactive, so the server resolves it on its own clock |
 | `AttackResult` | Server → Client | `{ hit, reason, damage, riposte }` | Swing outcome. `reason` is one of `hit`, `missed`, `cooldown`, `exhausted`, `no_target` |
@@ -112,11 +113,22 @@ remembering to keep two fields in sync. Adding a class means adding a row to
 
 ## Naming registry — Enemies / attacks
 
-| Enemy id | Attack id | Parryable | Notes |
-|---|---|---|---|
-| `TrainingDummy` | `Overhead` | yes | Baseline parryable attack |
-| `TrainingDummy` | `GroundSlam` | **no** | Must-dodge; exists so combat isn't "parry everything" |
-| *(add new rows here as they're built)* | | | |
+Behaviour is data, not code. An enemy is defined by its attack bands
+(`minRange`/`maxRange`), where it wants to stand (`preferredRange`) and how it
+weights its options — a charging melee type and a kiting ranged type come out of
+the same `AttackSelector` with no per-enemy branches. **If a new enemy needs a
+branch in `AttackSelector`, the behaviour belongs in `EnemyDefs` as data
+instead.**
+
+| Enemy id | Role | Attack id | Parryable | Notes |
+|---|---|---|---|---|
+| `TrainingDummy` | stationary | `Overhead` | yes | Baseline parryable attack |
+| `TrainingDummy` | | `GroundSlam` | **no** | Must-dodge; exists so combat isn't "parry everything" |
+| `Shambler` | melee, closes | `Claw` | yes | Fast pressure at touching range |
+| `Shambler` | | `Lunge` | yes | Gap-closer, `minRange` 9 so it reads as a lunge not a swing |
+| `Spitter` | ranged, kites | `Spit` | yes | Narrow 25° cone at range |
+| `Spitter` | | `Spray` | **no** | Point-blank panic option, so closing the gap isn't a free win |
+| *(add new rows here as they're built)* | | | | |
 
 ## Naming registry — Parry verdicts
 

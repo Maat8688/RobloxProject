@@ -107,6 +107,37 @@ function ParryMath.checkReadiness(stamina: number, lockoutUntil: number, serverN
 	return { allowed = true }
 end
 
+export type ParryCandidate = {
+	enemyId: string,
+	impactTime: number,
+	parryable: boolean,
+}
+
+-- With more than one enemy winding up, a single parry press has to resolve to
+-- exactly one incoming attack. The server decides, not the client — the client
+-- never names a target.
+--
+-- The rule is "whichever lands nearest the moment you pressed". Deliberately
+-- NOT "whichever parryable attack is nearest": if an unparryable attack is the
+-- thing about to hit you, parrying should fail against it rather than quietly
+-- redirect to a different enemy. Otherwise the player learns nothing from the
+-- miss, and reading which attack lands first stops mattering — which is the
+-- skill the telegraph system is supposed to be testing.
+function ParryMath.selectParryTarget(candidates: { ParryCandidate }, attemptTime: number): ParryCandidate?
+	local best: ParryCandidate? = nil
+	local bestDistance = math.huge
+
+	for _, candidate in candidates do
+		local distance = math.abs(candidate.impactTime - attemptTime)
+		if distance < bestDistance then
+			best = candidate
+			bestDistance = distance
+		end
+	end
+
+	return best
+end
+
 -- Regen is time-based rather than tick-based so the result does not depend on
 -- server framerate.
 function ParryMath.regenerateStamina(current: number, elapsedSeconds: number): number
