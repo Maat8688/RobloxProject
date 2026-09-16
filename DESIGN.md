@@ -7,8 +7,8 @@
 ## Status
 
 Vertical slice + weapon/class framework + generalized enemy AI + dungeon
-generator + chest gating + loot/inventory + blacksmith economy in progress
-(Sept 2026): a
+generator + chest gating + loot/inventory + blacksmith economy + healer
+mechanics/balance pass + PvP arena in progress (Sept 2026): a
 procedurally-chained sequence of gray-box rooms (one safe Start room with
 the weapon pickups, 3-5 randomized Combat rooms) connected by corridors,
 each combat room spawning one of two enemy types (TrainingDummy,
@@ -17,12 +17,14 @@ chest grants a real, inventory-persisted `ItemInstance` (deterministic
 rarity by enemy type, not rolled) viewable via a press-`I` panel; three
 weapons (Tank, Assassin, Healer); server-authoritative parry/hit-reg/stagger
 loop throughout, including a genuinely unparryable must-dodge attack
-(`GroundSlam`); kills pay coins plus class-keyed crystals, spendable at a
-physical anvil in the start room to upgrade the equipped weapon through five
-tiers. No animations/models/VFX yet — confirmed with the user this stays
-gray-box until step 10, per its own place in the build order below.
-Healer-specific mechanics (burst heal), Assassin backstab, Mage, and PvP are
-still ahead.
+(`GroundSlam`, which now also bleeds for a few seconds after it hits); kills
+pay coins plus class-keyed crystals, spendable at a physical anvil in the
+start room to upgrade the equipped weapon through five tiers. A Healer's
+successful parry now heals itself plus any ally standing nearby. A separate
+1v1 duel arena (queue stand near spawn) reuses the exact same
+attack/telegraph/parry system for PvP. No animations/models/VFX yet —
+confirmed with the user this stays gray-box until step 10, per its own place
+in the build order below. Assassin backstab and Mage are still ahead.
 
 ## Core loop
 
@@ -47,7 +49,33 @@ spend coins/crystals at the blacksmith to upgrade existing gear → repeat.
   rather than a passive HoT bot, and (b) dungeon mechanics with unavoidable
   chip damage / DoTs / execute thresholds that specifically require a healer
   to counter. Do not erode this via solo-balance changes without logging the
-  change here first.
+  change here first. **Implemented (step 8)**: (a) is
+  `CombatServer.healNearbyAllies` — a successful Healer parry heals the
+  parrying player plus every other player within
+  `CombatConstants.HEALER_PARRY_HEAL_RADIUS`, capped at each Humanoid's
+  `MaxHealth`. (b) is `GroundSlam`'s new `dot` — a bleed that keeps ticking
+  for a few seconds after the hit lands, so a mistimed dodge isn't just one
+  number a Tank can shrug off; it's chip damage that only sustain fully
+  undoes. Execute thresholds and a room-wide unavoidable pulse are the other
+  examples this bullet named — deliberately not added too, since the DoT
+  alone already satisfies the pillar; revisit only if playtesting shows it
+  isn't enough.
+- **Solo play is not the design target — dungeons are group content, tuned
+  around a party having a healer.** Resolved from the "Open" question below
+  after asking the user directly: groups should be required to take on
+  dungeons at their level. This is what licenses tuning chip
+  damage/DoTs/execute thresholds hard in the healer bullet above without
+  also having to keep a lone Tank/Assassin viable — a solo run being harder
+  or outright unintended is acceptable, not a bug to fix.
+- **PvP has no simultaneous-parry clash rule, because there's nothing to
+  resolve.** Resolved from the "Open" question below after asking the user
+  directly: a parry is always a reaction to one specific incoming attack
+  (see `PvP/Duelist.luau`), never a mutual action two players do "at" each
+  other. If both players happen to be attacking each other at once, each
+  parry is checked independently against the other's own telegraph — both
+  can succeed, both can fail, or one of each, with no shared outcome to
+  arbitrate. Do not add clash/priority logic later without a concrete case
+  that actually needs it.
 - **Magic enhances combat, it doesn't replace it** — except Mage, which is
   the explicit, deliberate exception.
 - **Dungeon generation is room-prefab + connector based**, not noise/terrain
@@ -126,14 +154,30 @@ spend coins/crystals at the blacksmith to upgrade existing gear → repeat.
   (`CombatConstants.STAGGER_DAMAGE_MULTIPLIER`). That ordering is the
   "skill must count as much as level/gear" pillar expressed as numbers —
   don't raise the upgrade ceiling past the stagger bonus without logging why.
+- **PvP duel health is a virtual per-duel pool (`Duelist.health`), not the
+  real Humanoid.** A duel never actually damages or kills the character, so
+  there's no respawn/ragdoll flow to fight, and a loss is just "this pool
+  hit 0" rather than a real character death — `ArenaService` teleports both
+  players back to the start room the same way either way. Reconsider only if
+  a real health bar tied to the actual Humanoid becomes a requirement later
+  (e.g. for a shared PvE/PvP health display).
+- **One shared PvP arena, one active duel at a time.** A third/fourth queued
+  player just waits for the current duel to finish. PvP is a secondary mode
+  reusing PvE's combat system, not something that needed multi-arena
+  matchmaking on day one — revisit if duel queue times actually become a
+  complaint.
+- **PvP reuses `WeaponDefs`/`CombatConstants` directly** (`baseDamage`,
+  `parryWindow`, `STAGGER_DAMAGE_MULTIPLIER`, `STAGGER_DURATION`,
+  `RECOVER_DURATION`) rather than PvP-specific numbers, per the "PvP exists
+  but reuses the same combat system" decision above. The one new number is
+  per-weapon `pvpTelegraphDuration` (`WeaponDefs`), since a player has no
+  `EnemyDefs` attack entry to read a telegraph length from the way an enemy
+  does — Tank slowest/easiest to punish, Assassin fastest/hardest to react
+  to, matching each weapon's existing parry-window identity.
 
 ## Open / not yet decided
 
-- Is solo play fully supported, or is this group-first content? This changes
-  how hard healer-necessity can be tuned.
 - Fixed class roster (Tank/Assassin/Healer/Mage/...) or open to add more later?
-- PvP: does a simultaneous parry cause a clash/neutral outcome, or does one
-  side win?
 
 ## Build order
 
@@ -205,6 +249,21 @@ spend coins/crystals at the blacksmith to upgrade existing gear → repeat.
    and making loot spendable too would mean deciding what a neutral-material
    sink does to the "what's inside reflects who you beat" pillar, which is a
    step 8 balance question, not a plumbing one.
-8. Healer-specific mechanics + a real balance pass.
-9. PvP arena mode.
+8. ~~Healer-specific mechanics + a real balance pass~~. **Implemented**:
+   burst-heal-on-parry (`CombatServer.healNearbyAllies`) and `GroundSlam`'s
+   new bleed `dot` — see the "Healer must be near-indispensable" decision
+   above for both. The balance pass itself was scoped down to these two
+   concrete mechanics plus confirming solo play is not a design target
+   (also above), rather than a full numeric tuning sweep of every
+   weapon/enemy — those numbers (WeaponDefs damage/cooldowns, EnemyDefs
+   hp/rewards) are unchanged from steps 2–7 and still need real playtesting
+   before they're worth re-tuning blind.
+9. ~~PvP arena mode~~. **Implemented**: a queue stand near spawn teleports two
+   queued players into a separate shared arena (well clear of the dungeon)
+   and runs a 1v1 duel over the exact same AttackAttempt/ParryAttempt remotes
+   and Enemy-style Idle/Telegraph/Staggered/Recover state machine PvE uses —
+   see `PvP/Duelist.luau`, `PvP/ArenaService.luau`,
+   `PvP/PvPCombatServer.luau`, and the PvP decisions above for what's
+   deliberately scoped out (multi-arena matchmaking, a real Humanoid health
+   bar). Needs in-Studio playtesting for feel, same as every other step here.
 10. Persistence (DataStores), polish, VFX.

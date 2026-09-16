@@ -102,8 +102,33 @@ function Enemy:_resolveAttack(attack)
 				humanoid.Health -= attack.damage
 			end
 			playerHitRemote:FireClient(player, attack.damage, self.id)
+
+			if attack.dot then
+				self:_applyDot(player, attack.dot)
+			end
 		end
 	end
+end
+
+-- Ticks `dot.tickDamage` every `dot.tickInterval` for `dot.ticks`, independent
+-- of the enemy's own state (the enemy can die, respawn, or start a new
+-- attack while a player is still bleeding from this one). Stops early if the
+-- player leaves or their character is gone.
+function Enemy:_applyDot(player, dot)
+	task.spawn(function()
+		for _ = 1, dot.ticks do
+			task.wait(dot.tickInterval)
+
+			local character = player.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if humanoid == nil or humanoid.Health <= 0 then
+				return
+			end
+
+			humanoid.Health -= dot.tickDamage
+			playerHitRemote:FireClient(player, dot.tickDamage, self.id)
+		end
+	end)
 end
 
 function Enemy:_applyDamage(amount, killer)
@@ -172,15 +197,17 @@ end
 -- ping, not the client's own clock — client and server os.clock() aren't
 -- synchronized, so a client-supplied timestamp can't be compared directly
 -- against the server's telegraphResolveTime. `parryWindow` is the equipped
--- weapon's own window (Tank wide, Assassin tight — see WeaponDefs).
+-- weapon's own window (Tank wide, Assassin tight — see WeaponDefs). Returns
+-- whether the parry actually succeeded, so callers can react to it (e.g. a
+-- Healer's parry-triggered burst heal — see CombatServer.luau).
 function Enemy:TryParry(player, parryWindow)
 	if self.state ~= "Telegraph" or self.telegraphResolveTime == nil then
-		return
+		return false
 	end
 
 	local pendingAttack = self.def.attacks[self.pendingAttackId]
 	if pendingAttack == nil or not pendingAttack.parryable then
-		return
+		return false
 	end
 
 	local halfPing = player:GetNetworkPing() / 2
@@ -189,7 +216,10 @@ function Enemy:TryParry(player, parryWindow)
 
 	if delta <= parryWindow then
 		self.parriedThisAttack = true
+		return true
 	end
+
+	return false
 end
 
 function Enemy:_runLoop()

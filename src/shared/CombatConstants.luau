@@ -18,4 +18,15 @@ CombatConstants.STAGGER_DURATION = 1.2
 CombatConstants.RECOVER_DURATION = 0.8
 CombatConstants.ENEMY_RESPAWN_DELAY = 3
 
+-- Healer (build order step 8): a successful Healer parry heals the parrying
+-- player plus any ally within range, not just the Healer — this is the
+-- mechanic that makes healing part of the skill loop instead of a passive
+-- HoT bot (DESIGN.md's "Healer must be near-indispensable" pillar).
+CombatConstants.HEALER_PARRY_BURST_HEAL = 25
+CombatConstants.HEALER_PARRY_HEAL_RADIUS = 20
+
+-- PvP (build order step 9): duel health is a virtual pool, not the real
+-- Humanoid — see PvP/Duelist.luau.
+CombatConstants.PVP_STARTING_HEALTH = 100
+
 return CombatConstants

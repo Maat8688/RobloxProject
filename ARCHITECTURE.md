@@ -48,11 +48,26 @@ src/
                                   -- EquipService.SetWeapon
     Combat/
       CombatServer.luau          -- rate-limits attacks, wires remotes to enemy instances,
-                                  -- reads the attacker's weapon from EquipService
+                                  -- reads the attacker's weapon from EquipService; also
+                                  -- triggers a Healer's parry-triggered burst heal
+                                  -- (healNearbyAllies) on a successful parry
       Enemy.luau                 -- generalized enemy AI: state machine + Workspace model,
                                   -- picks randomly among its EnemyDefs attacks each cycle.
                                   -- A separate EnemyAI.luau was planned but turned out
-                                  -- unnecessary — see DESIGN.md's decision log.
+                                  -- unnecessary — see DESIGN.md's decision log. TryParry
+                                  -- returns whether it succeeded; an attack whose def sets
+                                  -- `dot` also applies a damage-over-time tick to whoever
+                                  -- it hits, independent of the enemy's own state
+    PvP/                          -- 1v1 duel arena (build order step 9)
+      Duelist.luau                -- per-player Idle/Telegraph/Staggered/Recover state for
+                                  -- one side of a duel, mirroring Enemy.luau's own state
+                                  -- machine but player-triggered; health is a virtual pool,
+                                  -- not the real Humanoid (see DESIGN.md)
+      ArenaService.luau           -- builds the shared arena room, owns the duel queue and
+                                  -- who is currently dueling whom; one active duel at a time
+      PvPCombatServer.luau        -- wires the same AttackAttempt/ParryAttempt remotes
+                                  -- CombatServer.luau uses for PvE to duel resolution instead,
+                                  -- for whichever two players ArenaService says are dueling
     Dungeon/
       DungeonGenerator.luau      -- stitches a straight chain of rooms + corridors,
                                   -- spawns enemies at each combat room's marked point.
@@ -90,6 +105,11 @@ src/
 | `UpgradeResult` | Server → Client | `{ success, reason?, newLevel? }` | Outcome of a blacksmith upgrade attempt; `reason` is the player-facing refusal text |
 | `ChestOpened` | Server → Client | `{ chestId, loot[] }` | Fired when a chest is opened; `loot[]` holds one `LootTables` descriptor (display info, not the stored `ItemInstance`) |
 | `InventoryUpdated` | Server → Client | `{ items[] }` | Fired by InventoryService with the player's full current `ItemInstance` list whenever it changes |
+| `HealBurst` | Server → Client | `{ amount }` | Fired to each player actually healed by a Healer's parry-triggered burst (CombatServer.luau's `healNearbyAllies`) |
+| `PvPStatusChanged` | Server → Client | `{ status, opponentName?, resultMessage? }` | Fired by ArenaService on queue/duel-state transitions; `status` is `"idle"` \| `"queued"` \| `"dueling"`, `resultMessage` is only set right after a duel ends |
+| `PvPTelegraphStart` | Server → Client | `{ attackerName, duration }` | Fired to the defending duelist only when their opponent swings |
+| `PvPParryResult` | Server → Client | `{ success, message }` | Fired to both duelists once a PvP swing resolves — the defender on a successful parry, the attacker on a blocked one |
+| `PvPHealthChanged` | Server → Client | `{ yourHealth, opponentHealth }` | Fired to both duelists whenever either one's virtual duel HP changes |
 | *(add new rows here as they're built)* | | | |
 
 > `ParryAttempt`/`AttackAttempt` carry a client timestamp for future prediction
@@ -180,6 +200,10 @@ src/
       parryable: boolean,       -- false = must-dodge; no timing window can block it
       damage: number,
       range: number,            -- how close a player must be to take this specific attack
+      dot: { tickDamage: number, tickInterval: number, ticks: number }?,
+                                 -- optional damage-over-time applied on top of the instant
+                                 -- hit (see Enemy:_applyDot) — the "unavoidable chip damage"
+                                 -- half of the healer-indispensable pillar (DESIGN.md step 8)
     },
   },
 }

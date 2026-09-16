@@ -15,10 +15,42 @@ local EquipService = require(script.Parent.Parent.EquipService)
 
 local attackAttemptRemote = Remotes.Get(Remotes.Names.AttackAttempt)
 local parryAttemptRemote = Remotes.Get(Remotes.Names.ParryAttempt)
+local healBurstRemote = Remotes.Get(Remotes.Names.HealBurst)
 
 local CombatServer = {}
 
 local lastSwingAt = {}
+
+-- Heals `healer` plus every other player within HEALER_PARRY_HEAL_RADIUS of
+-- them, up to their Humanoid's MaxHealth. Fired only after a Healer's parry
+-- actually lands (see the ParryAttempt handler below) — this is the "parry
+-- near allies triggers burst heal" mechanic from DESIGN.md's healer pillar,
+-- deliberately not a passive HoT.
+local function healNearbyAllies(healer, healerPosition)
+	for _, player in Players:GetPlayers() do
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if humanoid == nil or rootPart == nil then
+			continue
+		end
+
+		if player ~= healer then
+			local distance = (rootPart.Position - healerPosition).Magnitude
+			if distance > CombatConstants.HEALER_PARRY_HEAL_RADIUS then
+				continue
+			end
+		end
+
+		local healed = math.min(CombatConstants.HEALER_PARRY_BURST_HEAL, humanoid.MaxHealth - humanoid.Health)
+		if healed <= 0 then
+			continue
+		end
+
+		humanoid.Health += healed
+		healBurstRemote:FireClient(player, healed)
+	end
+end
 
 -- Nearest non-Dead enemy whose PrimaryPart is within `range` of `position`,
 -- optionally filtered further by `predicate(enemy)`. No aggro/threat system —
@@ -86,7 +118,10 @@ function CombatServer.Start(enemies)
 			return
 		end
 
-		target:TryParry(player, weaponDef.parryWindow)
+		local parried = target:TryParry(player, weaponDef.parryWindow)
+		if parried and weaponDef.class == "Healer" then
+			healNearbyAllies(player, rootPart.Position)
+		end
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)

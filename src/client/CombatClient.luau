@@ -25,6 +25,11 @@ local chestOpenedRemote = Remotes.Get(Remotes.Names.ChestOpened)
 local inventoryUpdatedRemote = Remotes.Get(Remotes.Names.InventoryUpdated)
 local currencyUpdatedRemote = Remotes.Get(Remotes.Names.CurrencyUpdated)
 local upgradeResultRemote = Remotes.Get(Remotes.Names.UpgradeResult)
+local healBurstRemote = Remotes.Get(Remotes.Names.HealBurst)
+local pvpStatusRemote = Remotes.Get(Remotes.Names.PvPStatusChanged)
+local pvpTelegraphRemote = Remotes.Get(Remotes.Names.PvPTelegraphStart)
+local pvpParryResultRemote = Remotes.Get(Remotes.Names.PvPParryResult)
+local pvpHealthRemote = Remotes.Get(Remotes.Names.PvPHealthChanged)
 
 -- itemId -> display name, looked up from the same shared LootTables the
 -- server built the ItemInstance from (ItemInstance itself has no name field).
@@ -82,6 +87,18 @@ damageFlash.Parent = screenGui
 playerHitRemote.OnClientEvent:Connect(function()
 	damageFlash.BackgroundTransparency = 0.6
 	TweenService:Create(damageFlash, TweenInfo.new(0.4), { BackgroundTransparency = 1 }):Play()
+end)
+
+local healFlash = Instance.new("Frame")
+healFlash.Size = UDim2.fromScale(1, 1)
+healFlash.BackgroundColor3 = Color3.fromRGB(0, 200, 80)
+healFlash.BackgroundTransparency = 1
+healFlash.ZIndex = 10
+healFlash.Parent = screenGui
+
+healBurstRemote.OnClientEvent:Connect(function()
+	healFlash.BackgroundTransparency = 0.7
+	TweenService:Create(healFlash, TweenInfo.new(0.4), { BackgroundTransparency = 1 }):Play()
 end)
 
 local weaponLabel = Instance.new("TextLabel")
@@ -215,6 +232,78 @@ inventoryUpdatedRemote.OnClientEvent:Connect(function(items)
 		row.Text = (ITEM_NAMES[item.itemId] or item.itemId) .. " (" .. item.rarity .. ")"
 		row.Parent = inventoryList
 	end
+end)
+
+-- PvP (build order step 9): status/HP are persistent while relevant, the
+-- telegraph/parry-result lines are transient flashes like upgradeLabel above.
+local pvpStatusLabel = Instance.new("TextLabel")
+pvpStatusLabel.Size = UDim2.fromOffset(260, 24)
+pvpStatusLabel.Position = UDim2.fromOffset(10, 74)
+pvpStatusLabel.BackgroundTransparency = 0.4
+pvpStatusLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+pvpStatusLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+pvpStatusLabel.Font = Enum.Font.SourceSansBold
+pvpStatusLabel.TextSize = 16
+pvpStatusLabel.Visible = false
+pvpStatusLabel.Parent = screenGui
+
+local pvpHealthLabel = Instance.new("TextLabel")
+pvpHealthLabel.Size = UDim2.fromOffset(260, 24)
+pvpHealthLabel.Position = UDim2.fromOffset(10, 100)
+pvpHealthLabel.BackgroundTransparency = 0.4
+pvpHealthLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+pvpHealthLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+pvpHealthLabel.Font = Enum.Font.SourceSansBold
+pvpHealthLabel.TextSize = 16
+pvpHealthLabel.Visible = false
+pvpHealthLabel.Parent = screenGui
+
+local pvpFlashLabel = Instance.new("TextLabel")
+pvpFlashLabel.Size = UDim2.new(0.5, 0, 0, 30)
+pvpFlashLabel.Position = UDim2.new(0.25, 0, 0, 140)
+pvpFlashLabel.BackgroundTransparency = 1
+pvpFlashLabel.TextTransparency = 1
+pvpFlashLabel.Font = Enum.Font.SourceSansBold
+pvpFlashLabel.TextSize = 22
+pvpFlashLabel.TextWrapped = true
+pvpFlashLabel.Parent = screenGui
+
+local function flashPvPMessage(text, color)
+	pvpFlashLabel.Text = text
+	pvpFlashLabel.TextColor3 = color
+	pvpFlashLabel.TextTransparency = 0
+	TweenService:Create(pvpFlashLabel, TweenInfo.new(2), { TextTransparency = 1 }):Play()
+end
+
+pvpStatusRemote.OnClientEvent:Connect(function(status, opponentName, resultMessage)
+	if status == "queued" then
+		pvpStatusLabel.Text = "Queued for duel..."
+		pvpStatusLabel.Visible = true
+		pvpHealthLabel.Visible = false
+	elseif status == "dueling" then
+		pvpStatusLabel.Text = "Dueling: " .. (opponentName or "?")
+		pvpStatusLabel.Visible = true
+	else
+		pvpStatusLabel.Visible = false
+		pvpHealthLabel.Visible = false
+	end
+
+	if resultMessage then
+		flashPvPMessage(resultMessage, Color3.fromRGB(200, 200, 255))
+	end
+end)
+
+pvpHealthRemote.OnClientEvent:Connect(function(yourHealth, opponentHealth)
+	pvpHealthLabel.Text = string.format("You: %d | Opponent: %d", yourHealth, opponentHealth)
+	pvpHealthLabel.Visible = true
+end)
+
+pvpTelegraphRemote.OnClientEvent:Connect(function(attackerName, _duration)
+	flashPvPMessage(attackerName .. " is attacking — parry!", Color3.fromRGB(255, 230, 60))
+end)
+
+pvpParryResultRemote.OnClientEvent:Connect(function(success, message)
+	flashPvPMessage(message, success and Color3.fromRGB(120, 255, 120) or Color3.fromRGB(255, 120, 120))
 end)
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)

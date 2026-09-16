@@ -19,6 +19,11 @@ Remotes.Names = {
 	InventoryUpdated = "InventoryUpdated",
 	CurrencyUpdated = "CurrencyUpdated",
 	UpgradeResult = "UpgradeResult",
+	HealBurst = "HealBurst",
+	PvPStatusChanged = "PvPStatusChanged",
+	PvPTelegraphStart = "PvPTelegraphStart",
+	PvPParryResult = "PvPParryResult",
+	PvPHealthChanged = "PvPHealthChanged",
 }
 
 local FOLDER_NAME = "Remotes"

@@ -7,6 +7,14 @@
 -- magic replaces basic combat rather than enhancing it, which needs a
 -- different combat model, not just another row in this table.
 
+-- pvpTelegraphDuration (build order step 9): how long a swing telegraphs to
+-- the opponent in a PvP duel before it resolves — players have no EnemyDefs
+-- attack entry to read this from like enemies do, so it lives here instead.
+-- Kept in the same spirit as each weapon's parryWindow: Tank telegraphs
+-- slowest (easiest to read/punish, matching its forgiving-but-honest
+-- identity), Assassin fastest (hardest to react to, matching its tight,
+-- high-risk parry window), Healer in between (not built to win duels).
+
 local WeaponDefs = {
 	Tank = {
 		class = "Tank",
@@ -14,6 +22,7 @@ local WeaponDefs = {
 		swingCooldown = 0.5,
 		parryWindow = 0.20,
 		swingRange = 8,
+		pvpTelegraphDuration = 0.5,
 	},
 	Assassin = {
 		class = "Assassin",
@@ -21,6 +30,7 @@ local WeaponDefs = {
 		swingCooldown = 0.35,
 		parryWindow = 0.08,
 		swingRange = 6,
+		pvpTelegraphDuration = 0.3,
 	},
 	Healer = {
 		class = "Healer",
@@ -28,6 +38,7 @@ local WeaponDefs = {
 		swingCooldown = 0.6,
 		parryWindow = 0.15,
 		swingRange = 8,
+		pvpTelegraphDuration = 0.45,
 	},
 }
 

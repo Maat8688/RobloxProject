@@ -45,11 +45,17 @@ local EnemyDefs = {
 				damage = 12,
 				range = 8,
 			},
+			-- `dot`: the "unavoidable chip damage" half of DESIGN.md's healer-
+			-- indispensable pillar (step 8) — GroundSlam is already
+			-- must-dodge-only (not parryable), and a player who mistimes the
+			-- dodge now keeps bleeding after the hit lands, so a group needs
+			-- sustain to fully undo it rather than just eating one number.
 			GroundSlam = {
 				telegraphDuration = 0.9,
 				parryable = false,
 				damage = 25,
 				range = 14,
+				dot = { tickDamage = 5, tickInterval = 1, ticks = 3 },
 			},
 		},
 	},
