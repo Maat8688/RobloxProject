@@ -167,8 +167,10 @@ local EnemyDefs: { [string]: EnemyDef } = {
 				weight = 4,
 				cooldown = 0,
 			},
-			-- A gap-closer: only legal from range, so it reads as a lunge
-			-- rather than another melee swing.
+			-- A long reach: only legal from range, so it reads as a lunge
+			-- rather than another melee swing. The Shambler doesn't move while
+			-- winding up, so maxRange must not exceed range — a lunge started
+			-- beyond its reach could only ever miss.
 			Lunge = {
 				telegraphDuration = 1.1,
 				parryable = true,
@@ -176,7 +178,7 @@ local EnemyDefs: { [string]: EnemyDef } = {
 				range = 18,
 				arcDegrees = 60,
 				minRange = 9,
-				maxRange = 20,
+				maxRange = 18,
 				weight = 3,
 				cooldown = 4,
 			},

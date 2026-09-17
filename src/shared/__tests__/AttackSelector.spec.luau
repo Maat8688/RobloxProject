@@ -181,6 +181,17 @@ describe("EnemyDefs invariants", function()
 		end
 	end)
 
+	-- Enemies hold still through a windup, so an attack chosen from further
+	-- away than it reaches is a guaranteed miss.
+	it("never lets an attack be chosen from beyond its own reach", function()
+		for enemyId, def in EnemyDefs do
+			for attackId, attack in def.attacks do
+				local label = `{enemyId}.{attackId}`
+				expect({ label, attack.maxRange <= attack.range }).toEqual({ label, true })
+			end
+		end
+	end)
+
 	it("keeps every bleed well-formed", function()
 		for _, def in EnemyDefs do
 			for _, attack in def.attacks do

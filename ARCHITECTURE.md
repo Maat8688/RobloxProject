@@ -87,7 +87,10 @@ src/client/            -> StarterPlayer.StarterPlayerScripts.Client
   CombatClient.luau      -- combat input: parry timestamp, swing request, and
                          -- Studio-only 1/2/3 weapon swaps
   CameraLock.luau        -- toggleable shift-lock camera (Left Shift)
-  TelegraphVFX.luau      -- windup/stagger/death colours on enemy rigs
+  TelegraphVFX.luau      -- windup/stagger/death colours on enemy rigs, and
+                         -- ground danger zones for all-around attacks
+  WorldFeedback.luau     -- enemy health bars, damage numbers, hit and
+                         -- parry flashes/sparks
   GameUI.luau            -- player-facing UI: flashes, weapon, currency, loot,
                          -- upgrades, inventory (I), duel status
   DebugHUD.luau          -- tuning readout (temporary; replaced at step 10)
@@ -203,7 +206,9 @@ weights its options — a charging melee type and a kiting ranged type come out 
 the same `AttackSelector` with no per-enemy branches. **If a new enemy needs a
 branch in `AttackSelector`, the behaviour belongs in `EnemyDefs` as data
 instead.** Every enemy is leashed to its room, and any enemy type can guard a
-chest, so a new enemy also needs a `LootTables` row.
+chest, so a new enemy also needs a `LootTables` row. Enemies hold still through
+a windup, so every attack's `maxRange` must be at most its `range` — a test
+enforces it.
 
 | Enemy id | Role | Rewards | Attack id | Parryable | Notes |
 |---|---|---|---|---|---|
@@ -212,7 +217,7 @@ chest, so a new enemy also needs a `LootTables` row.
 | `SkeletonWarrior` | melee, tough | 25 coins, 1 crystal | `Slash` | yes | Quick parryable swing |
 | | | | `GroundSlam` | **no** | Hit volume (14) wider than its use range (10); leaves a bleed |
 | `Shambler` | melee, closes | 15 coins | `Claw` | yes | Fast pressure at touching range |
-| | | | `Lunge` | yes | Gap-closer, `minRange` 9 so it reads as a lunge, not a swing |
+| | | | `Lunge` | yes | Long reach, `minRange` 9 so it reads as a lunge, not a swing |
 | `Spitter` | ranged, kites | 15 coins | `Spit` | yes | Narrow 25° cone at range |
 | | | | `Spray` | **no** | Point-blank panic option, so closing the gap isn't a free win |
 | *(add new rows here as they're built)* | | | | | |
@@ -223,7 +228,13 @@ Enemy models carry the attributes `EnemyId` and `EnemyDefId`.
 
 | Tag | On | Purpose |
 |---|---|---|
-| `Enemy` | every enemy model | Client lookup by `EnemyId` wherever the model is parented (`EnemyAI.TAG`) |
+| `Enemy` | every enemy model | Client lookup by `EnemyId` wherever the model is parented (`EnemyAI.TAG`). Clients also watch it for enemies streaming in, so they never assume a model exists yet |
+
+**Client-only VFX instances.** `DangerZone` parts in Workspace,
+`HealthBar_<enemyId>` BillboardGuis in PlayerGui, and hit/parry `Highlight`s
+and spark attachments under enemy models are created by each client for itself
+and never replicate. Nothing on the server may look for them. All of it uses
+Roblox's built-in defaults — no uploaded assets.
 
 ## Naming registry — Parry verdicts
 

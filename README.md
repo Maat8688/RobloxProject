@@ -5,8 +5,9 @@ Your equipped weapon *is* your class — pick a weapon, run a procedurally gener
 dungeon, clear the enemy guarding each chest, and spend coins and crystals at the
 blacksmith to upgrade what you carry. A 1v1 duel arena runs on the same combat rules.
 
-**Status:** build-order steps 1–9 are code-complete and gray-box — no models,
-animations or VFX yet. Nothing has had a tuning pass; see [`DESIGN.md`](DESIGN.md).
+**Status:** all ten build-order steps are code-complete, including saved progress.
+Visuals are gray-box — feedback effects, but no models, animations or sound yet — and
+nothing has had a tuning pass. See [`DESIGN.md`](DESIGN.md).
 
 ## Controls
 

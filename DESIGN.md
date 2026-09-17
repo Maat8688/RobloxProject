@@ -6,9 +6,9 @@
 
 ## Status
 
-Build-order steps 1–9 are code-complete (Sept 2026), and step 10's
-persistence is built. Lint and build are clean, with 127 unit tests passing
-against the pure combat, economy and save-data modules (`lune run test`).
+All ten build-order steps are code-complete (Sept 2026). Lint and build are
+clean, with 128 unit tests passing against the pure combat, economy and
+save-data modules (`lune run test`).
 Steps 1–3 were built on this branch; steps 4–9 were built on Maat8688's fork
 and merged in, re-based onto this branch's combat core (see
 [Merge of Maat8688's fork](#merge-of-maat8688s-fork-sept-2026)).
@@ -30,7 +30,8 @@ Studio.** Every number in `CombatConstants`, `WeaponDefs`, `EnemyDefs` and
 reject honest players during ping spikes; the Jest wiring in
 `tests/jest.config.luau` has never been run under real Jest; and saving has
 never touched a real DataStore — that needs the place published with Studio
-API access enabled. No animations, models or VFX yet.
+API access enabled. Visuals are gray-box: feedback VFX exist, but no models,
+animations or sound.
 
 ## Core loop
 
@@ -441,6 +442,36 @@ lowerCamelCase (`CombatServer.start`) rather than the fork's PascalCase.
   the DataStore size limit. A chest opened with a full inventory stays shut,
   rather than being consumed and losing its item to the cap at save time.
 
+## Decisions made in the polish and VFX pass (step 10, Sept 2026)
+
+Gray-box on purpose: no uploaded art, sounds or animations — only Roblox's
+built-in defaults — so everything here is readable feedback, not final
+visuals.
+
+- **All-around attacks draw their real hit area on the ground.** Their hit
+  radius can exceed the range they're used from (the SkeletonWarrior slams
+  from 10 studs but reaches 14), so without it the correct dodge distance was
+  unknowable, which undercuts "must-dodge" as a skill. Directional attacks
+  draw nothing: a full disc would misrepresent a cone, and they already read
+  from the enemy turning to face you.
+- **The stagger colour now survives hits.** Before, the first punish hit reset
+  a staggered enemy to its normal colour, hiding the "punish now" cue at the
+  one moment it mattered.
+- **Enemies show health bars**; before this, enemy health was only visible on
+  the debug HUD.
+- **Damage numbers show your own hits only**, since only the attacker receives
+  `AttackResult`. Riposte hits are larger and orange so the Assassin's payoff
+  is visible as it happens.
+- **A landed parry gets the biggest reaction** — sparks, a white flash and a
+  "PARRY" callout — because it's the action the whole combat design rewards.
+- **No sounds yet.** Roblox's built-in sound files aren't reliably present,
+  and anything else is an uploaded asset, which belongs with the real art in
+  a later pass.
+- **Fixed: the Shambler's `Lunge` could be chosen from beyond its reach.** It
+  was legal at up to 20 studs but hit only to 18, and enemies hold still
+  through a windup, so a lunge started at 19–20 studs always missed. A test
+  now requires every attack's `maxRange` to be at most its `range`.
+
 ## Open / not yet decided
 
 - ~~Is solo play fully supported, or is this group-first content? This changes
@@ -472,6 +503,8 @@ lowerCamelCase (`CombatServer.start`) rather than the fork's PascalCase.
    fork; the numeric balance pass still needs playtesting.
 9. ~~PvP arena mode.~~ Built on Maat8688's fork; rebuilt on this branch's
    combat rules at the merge.
-10. Persistence (DataStores), polish, VFX. Persistence built; untested
-    against a real DataStore until the place is published with Studio API
-    access enabled.
+10. ~~Persistence (DataStores), polish, VFX.~~ Built: session-locked
+    saving, plus a gray-box feedback pass (danger zones, health bars, damage
+    numbers, parry sparks). Saving is untested against a real DataStore until
+    the place is published with Studio API access enabled; real art, sound and
+    animation are still ahead.
