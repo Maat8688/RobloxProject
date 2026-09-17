@@ -133,6 +133,8 @@ function PvPCombatServer.handleAttack(attacker: Player)
 
 	local swing = Duelist.beginSwing(attackerDuelist, weaponId, now + attack.pvpTelegraph)
 
+	PlayerCombatState.announce(attacker, "swing", weaponId, attack.pvpTelegraph)
+
 	Remotes.get("PvPTelegraphStart"):FireClient(opponent, {
 		attackerName = attacker.Name,
 		duration = attack.pvpTelegraph,
@@ -181,6 +183,8 @@ function PvPCombatServer.handleParry(defender: Player, attemptTime: number, now:
 	-- Spent before evaluating, so a whiff costs the same as a success — the
 	-- cost that stops parry spam from making a duelist unbeatable.
 	state.stamina -= CombatConstants.PARRY_STAMINA_COST
+
+	PlayerCombatState.announce(defender, "parry", weaponId)
 
 	local swing = opponentDuelist.swing
 	local defenderRoot = Characters.getRoot(defender)

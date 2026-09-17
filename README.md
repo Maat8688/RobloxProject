@@ -6,8 +6,8 @@ dungeon, clear the enemy guarding each chest, and spend coins and crystals at th
 blacksmith to upgrade what you carry. A 1v1 duel arena runs on the same combat rules.
 
 **Status:** all ten build-order steps are code-complete, including saved progress.
-Visuals are gray-box — feedback effects, but no models, animations or sound yet — and
-nothing has had a tuning pass. See [`DESIGN.md`](DESIGN.md).
+Enemies are Part-built R15 rigs with first-draft animations, ready to be refined;
+there's no sound yet, and nothing has had a tuning pass. See [`DESIGN.md`](DESIGN.md).
 
 ## Controls
 
@@ -87,6 +87,29 @@ ships in the game), connect from Studio and press Play:
 ```sh
 rojo serve test.project.json
 ```
+
+## Animations
+
+Every enemy (idle, walk, each attack, stagger, death) and every player combat move
+(a swing per weapon, the parry) has a rough first-draft animation, stored as data in
+[`src/shared/AnimationDefs.luau`](src/shared/AnimationDefs.luau). The game plays them
+as-is; nothing needs uploading. To refine one in Roblox's Animation Editor:
+
+1. Build the workbench — every rig, with every animation loaded on it:
+   ```sh
+   lune run animation-workbench
+   ```
+2. Drag `workbench/AnimationWorkbench.rbxm` into a Studio place.
+3. Select a rig, open the Animation Editor, and load an animation from its saves.
+4. Refine it. For attacks and swings, keep the keyframe named **Impact** on the
+   moment the hit lands — the game times the strike to the server with it.
+5. Publish, and paste the ID into
+   [`src/shared/AnimationIds.luau`](src/shared/AnimationIds.luau) under the rig and
+   animation name. The game uses your version from then on.
+
+The workbench script checks its output before reporting success, including solving
+every animation against the floor. Regenerating replaces the file, so publish (or keep
+your own copy of) anything in progress first.
 
 ## Layout
 

@@ -6,9 +6,10 @@
 
 ## Status
 
-All ten build-order steps are code-complete (Sept 2026). Lint and build are
-clean, with 128 unit tests passing against the pure combat, economy and
-save-data modules (`lune run test`).
+All ten build-order steps are code-complete (Sept 2026), plus R15 rigs and
+rough animations for every enemy and for player combat. Lint and build are
+clean, with 170 unit tests passing against the pure combat, economy,
+save-data and animation modules (`lune run test`).
 Steps 1–3 were built on this branch; steps 4–9 were built on Maat8688's fork
 and merged in, re-based onto this branch's combat core (see
 [Merge of Maat8688's fork](#merge-of-maat8688s-fork-sept-2026)).
@@ -30,8 +31,8 @@ Studio.** Every number in `CombatConstants`, `WeaponDefs`, `EnemyDefs` and
 reject honest players during ping spikes; the Jest wiring in
 `tests/jest.config.luau` has never been run under real Jest; and saving has
 never touched a real DataStore — that needs the place published with Studio
-API access enabled. Visuals are gray-box: feedback VFX exist, but no models,
-animations or sound.
+API access enabled. Visuals are still rough: Part-built rigs and first-draft
+animations waiting to be refined in the Animation Editor, and no sound.
 
 ## Core loop
 
@@ -471,6 +472,66 @@ visuals.
   was legal at up to 20 studs but hit only to 18, and enemies hold still
   through a windup, so a lunge started at 19–20 studs always missed. A test
   now requires every attack's `maxRange` to be at most its `range`.
+
+## Decisions made adding rigs and animations (Sept 2026)
+
+- **Enemies are built from Parts in code, not downloaded models.** From this
+  repo there's no access to Studio's Toolbox or 3D importer, free Toolbox
+  models are the most common source of Roblox backdoors, and models from
+  other sites carry licence terms. Part-built rigs are free of all three
+  problems. Real meshes can replace the parts one for one later, under the
+  same names, without touching animation.
+- **R15-style rigs** *(chosen by the repo owner)*: elbows and knees make proper
+  walk cycles and attack arcs possible, and sharing a default R15 avatar's
+  part and joint names means one animation vocabulary covers enemies and
+  players, and any refined animation plays on any rig.
+- **Players get combat animations too** *(chosen by the repo owner)*. A new
+  `PlayerCombatAction` broadcast lets every client see every player's swings
+  and parries; before it, nobody could see anyone else attack.
+- **One source of truth for rigs and animations.** Both are plain data
+  (`RigDefs`, `AnimationDefs`). The game builds enemy rigs from it, and the
+  Lune workbench builds the rigs you refine on from it — through the same
+  `RigAssembly` code, which takes the Roblox API as an argument so it runs in
+  both places. What you refine is exactly what the game uses.
+- **Rough animations play straight from data, on each client.** Joints are
+  posed by writing `Motor6D.Transform`, so nothing has to be uploaded before
+  the game animates — in Studio or live. Animation is purely visual, so it
+  runs per client and costs the server nothing.
+- **A published version takes over with no code change.** Add its ID to
+  `AnimationIds` and that animation plays through Roblox's Animator instead;
+  the rough version stays as the fallback. Strikes keep their timing through a
+  keyframe named `Impact`.
+- **Strike animations are stretched to the real windup**, not played at a
+  fixed speed, so the visible hit always lands on the server's impact time —
+  the moment the parry window is measured from.
+- **Poses are written in `PreSimulation`**: after Roblox's Animator has posed
+  the rig for the frame, before joints are applied. That's what lets a player's
+  swing sit on top of their normal walk.
+- **Your own swings and parries animate on input**, without waiting for the
+  server. The client applies the checks it can (weapon equipped, swing
+  cooldown); a swing the server then refuses for stamina will still have
+  animated. Accepted, for responsive controls.
+- **The hitbox didn't change.** It's still the same invisible 4×6×4 box, and
+  every combat calculation reads it. The body is decoration hanging off it, so
+  none of the combat tuning moved.
+- **The wind-up cue became a glow over the whole rig** (a Highlight), since the
+  hitbox it used to colour is now invisible. Each rig keeps its own colours at
+  rest.
+- **Death is drawn on clients** (the animation, then a grey tint); the server
+  only turns off the body's collision so players can walk through it.
+- **Animations are checked against the floor.** The workbench solves every rig
+  at sampled moments of every animation and fails if anything sinks through
+  the floor, idle feet lift or dig in, or a death doesn't end lying down. It
+  caught two real bugs in the first draft: every death dropped the hips before
+  the body had tipped, driving the legs through the floor, and the zombie's
+  face-down fall pushed its arms into the ground.
+- **Rough poses interpolate one Euler angle at a time.** For the single-axis
+  swings these drafts use, that matches the Animation Editor; for big turns on
+  several axes at once it can differ slightly, which refining resolves.
+- **Asset uploads, if ever automated, use an Open Cloud API key, never an
+  account password.** A key can be limited to asset uploads for this
+  experience and revoked at any time; a password can't. Not needed yet: rough
+  animations need no uploads at all.
 
 ## Open / not yet decided
 

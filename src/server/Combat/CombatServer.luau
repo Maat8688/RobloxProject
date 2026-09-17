@@ -398,6 +398,8 @@ local function onAttackRequest(player: Player)
 	state.swinging = true
 	state.attackReadyAt = now + attack.windup + attack.cooldown
 
+	PlayerCombatState.announce(player, "swing", weaponId, attack.windup)
+
 	-- The weapon is captured now, so a swap landing mid-windup cannot change
 	-- which weapon this swing resolves as.
 	task.delay(attack.windup, resolveSwing, player, weaponId)
@@ -491,6 +493,8 @@ local function handlePvEParry(player: Player, attemptTime: number, now: number)
 	-- Spent before evaluating, so a whiff costs the same as a success. Parrying
 	-- on a read has to be a decision, not a free roll.
 	state.stamina -= CombatConstants.PARRY_STAMINA_COST
+
+	PlayerCombatState.announce(player, "parry", weaponId)
 
 	local candidate = ParryMath.selectParryTarget(collectParryCandidates(root), attemptTime)
 	local attack = if candidate then activeAttacks[candidate.enemyId] else nil

@@ -14,8 +14,24 @@ local Workspace = game:GetService("Workspace")
 local Shared = ReplicatedStorage.Shared
 local CombatConstants = require(Shared.CombatConstants)
 local ParryMath = require(Shared.ParryMath)
+local Remotes = require(Shared.Remotes)
 
 local PlayerCombatState = {}
+
+export type CombatAction = "swing" | "parry"
+
+-- Tells every client a player has started a swing or a parry, so everyone can
+-- animate it — not just the player doing it. Called once the server has
+-- accepted the action (it's been paid for), never on a rejected press.
+-- `windup` is how long this swing takes to land, for timing the animation.
+function PlayerCombatState.announce(player: Player, action: CombatAction, weaponId: string, windup: number?)
+	Remotes.get("PlayerCombatAction"):FireAllClients({
+		userId = player.UserId,
+		action = action,
+		weaponId = weaponId,
+		windup = windup,
+	})
+end
 
 export type State = {
 	stamina: number,

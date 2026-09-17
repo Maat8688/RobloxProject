@@ -14,22 +14,23 @@ local Workspace = game:GetService("Workspace")
 local Shared = ReplicatedStorage.Shared
 local AttackSelector = require(Shared.AttackSelector)
 local EnemyDefs = require(Shared.EnemyDefs)
+local RigAssembly = require(Shared.RigAssembly)
+local RigDefs = require(Shared.RigDefs)
 
 local EnemyAI = {}
 
 -- CollectionService tag on every enemy model. Clients look enemies up by it.
 EnemyAI.TAG = "Enemy"
 
--- Per-type colours so enemies are tellable apart at a glance while there are
--- no real models. TelegraphVFX mirrors this table.
-local TYPE_COLORS: { [string]: Color3 } = {
-	TrainingDummy = Color3.fromRGB(150, 60, 60),
-	SkeletonWarrior = Color3.fromRGB(200, 195, 170),
-	Shambler = Color3.fromRGB(120, 90, 50),
-	Spitter = Color3.fromRGB(80, 130, 70),
+-- The Roblox API, handed to RigAssembly — which the Lune workbench also runs,
+-- with its own implementation of the same API.
+local ROBLOX_API: RigAssembly.Api = {
+	Instance = Instance,
+	CFrame = CFrame,
+	Vector3 = Vector3,
+	Color3 = Color3,
+	Enum = Enum,
 }
-
-local DEFAULT_COLOR = Color3.fromRGB(150, 60, 60)
 
 export type EnemyState = "idle" | "telegraph" | "staggered" | "dead"
 
@@ -74,16 +75,23 @@ function EnemyAI.spawn(
 	-- Flattened so the rig never tips.
 	local homeCFrame = CFrame.lookAt(position, Vector3.new(facePosition.X, position.Y, facePosition.Z))
 
+	-- The hitbox: invisible, anchored, and the only part that collides. Every
+	-- position the combat code reasons about is this part's. Named like an R15
+	-- root so the rig and its animations recognise it.
 	local root = Instance.new("Part")
-	root.Name = "Root"
-	root.Size = Vector3.new(4, 6, 4)
+	root.Name = "HumanoidRootPart"
+	root.Size = Vector3.new(RigDefs.ROOT_SIZE[1], RigDefs.ROOT_SIZE[2], RigDefs.ROOT_SIZE[3])
 	root.Anchored = true
-	root.Color = TYPE_COLORS[defId] or DEFAULT_COLOR
-	root.Material = Enum.Material.Metal
+	root.Transparency = 1
 	root.CFrame = homeCFrame
 	root.Parent = model
 
 	model.PrimaryPart = root
+
+	-- The visible body hangs off the hitbox on Motor6D joints, so moving the
+	-- root moves it all. Clients animate those joints; the server never does.
+	RigAssembly.attach(ROBLOX_API, root, defId, model)
+	RigAssembly.addAnimator(ROBLOX_API, model)
 
 	-- Read by the client for telegraph VFX, so the client never needs its own
 	-- registry of which model is which enemy. The tag lets clients find enemies
@@ -233,14 +241,14 @@ function EnemyAI.revive(enemy: Enemy)
 	enemy.alive = true
 	enemy.state = "idle"
 	enemy.cooldowns = {}
-	enemy.root.Transparency = 0
-	enemy.root.Color = TYPE_COLORS[enemy.defId] or DEFAULT_COLOR
+	enemy.root.CanCollide = true
 	enemy.root.CFrame = enemy.homeCFrame
 end
 
+-- Death is drawn on clients (a death animation, then a grey tint). The server
+-- only lets players walk through the body.
 function EnemyAI.markDead(enemy: Enemy)
-	enemy.root.Transparency = 0.7
-	enemy.root.Color = Color3.fromRGB(60, 60, 60)
+	enemy.root.CanCollide = false
 end
 
 return EnemyAI

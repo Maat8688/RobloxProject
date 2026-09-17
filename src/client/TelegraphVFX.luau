@@ -1,15 +1,16 @@
 --!strict
--- Visual read on every enemy's windup: the rig's colour ramp, the stagger
--- colour, and a ground danger zone for attacks that hit all around.
+-- Visual read on every enemy's windup: a glow over the rig that builds toward
+-- impact, the stagger and death tints, and a ground danger zone for attacks
+-- that hit all around.
 --
 -- This is the signal the player actually reacts to, so it has to track the
--- server's timeline exactly: the ramp runs toward impactTime, which the server
+-- server's timeline exactly: the glow runs toward impactTime, which the server
 -- sends as an absolute timestamp rather than a duration so a delayed packet
 -- doesn't shift the cue.
 --
--- State is per-enemy. A single shared connection would mean the second enemy
--- to wind up cancels the first one's cue, which is exactly the situation the
--- player most needs to read.
+-- The glow is a Highlight over the whole rig, so each rig keeps its own
+-- colours at rest and only lights up when something is happening. State is
+-- per enemy: a second enemy winding up must never cancel the first one's cue.
 
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -22,30 +23,22 @@ local Remotes = require(Shared.Remotes)
 
 local TelegraphVFX = {}
 
--- Parryable attacks ramp toward white so the parry beat is readable; the
--- unparryable ones go deep orange and never flash, so "this one you move out
--- of" is legible without reading a tooltip.
+-- Parryable attacks build toward white so the parry beat is readable;
+-- unparryable ones glow deep orange, so "this one you move out of" is legible
+-- without a tooltip.
 local PARRYABLE_PEAK = Color3.fromRGB(255, 255, 255)
 local UNPARRYABLE_PEAK = Color3.fromRGB(255, 120, 0)
 local STAGGER_COLOR = Color3.fromRGB(80, 120, 255)
-local DEAD_COLOR = Color3.fromRGB(60, 60, 60)
+local DEAD_COLOR = Color3.fromRGB(40, 40, 40)
 
--- Matches EnemyAI's per-type colours so a telegraph fades back to the right
--- base rather than to a single shared red.
-local BASE_COLORS: { [string]: Color3 } = {
-	TrainingDummy = Color3.fromRGB(150, 60, 60),
-	SkeletonWarrior = Color3.fromRGB(200, 195, 170),
-	Shambler = Color3.fromRGB(120, 90, 50),
-	Spitter = Color3.fromRGB(80, 130, 70),
-}
-
-local DEFAULT_BASE = Color3.fromRGB(150, 60, 60)
+local STAGGER_STRENGTH = 0.6
+local DEAD_STRENGTH = 0.85
 
 -- Server-side EnemyAI tags every enemy model with this.
 local ENEMY_TAG = "Enemy"
 
--- Held at peak briefly past impact so the hit reads, as a fraction of the
--- telegraph's length.
+-- Held at full glow briefly past impact so the hit reads, as a fraction of
+-- the telegraph's length.
 local HOLD_AFTER_IMPACT = 0.5
 
 -- Danger zones: a flat disc covering the attack's real hit volume.
@@ -55,18 +48,20 @@ local ZONE_END_TRANSPARENCY = 0.35
 local ZONE_IMPACT_TRANSPARENCY = 0.15
 
 type Telegraph = {
+	model: Model,
 	root: BasePart,
 	startTime: number,
 	impactTime: number,
 	parryable: boolean,
-	baseColor: Color3,
 	zone: Part?,
 }
 
 local telegraphs: { [string]: Telegraph } = {}
 
--- enemyId -> client clock time the stagger colour should clear.
+-- enemyId -> client clock time the stagger tint should clear.
 local staggeredUntil: { [string]: number } = {}
+local dead: { [string]: boolean } = {}
+local glows: { [string]: Highlight } = {}
 
 -- By tag rather than by scanning Workspace: dungeon enemies live inside a
 -- folder, not at the top level.
@@ -80,24 +75,54 @@ local function findEnemyModel(enemyId: string): Model?
 	return nil
 end
 
-local function defIdOf(model: Model): string?
-	local defId = model:GetAttribute("EnemyDefId")
-	return if typeof(defId) == "string" then defId else nil
-end
-
-local function baseColorFor(model: Model): Color3
-	local defId = defIdOf(model)
-	return if defId then BASE_COLORS[defId] or DEFAULT_BASE else DEFAULT_BASE
-end
-
--- The colour a rig should rest at when nothing is winding up.
-local function restingColor(enemyId: string, model: Model): Color3
-	local until_ = staggeredUntil[enemyId]
-	if until_ and os.clock() < until_ then
-		return STAGGER_COLOR
+-- One glow per enemy, made on first use and parented to the rig so it goes
+-- when the rig does.
+local function glowFor(enemyId: string, model: Model): Highlight
+	local existing = glows[enemyId]
+	if existing and existing.Parent == model then
+		return existing
 	end
 
-	return baseColorFor(model)
+	local glow = Instance.new("Highlight")
+	glow.Name = "TelegraphGlow"
+	glow.Adornee = model
+	glow.DepthMode = Enum.HighlightDepthMode.Occluded
+	glow.Enabled = false
+	glow.Parent = model
+
+	glows[enemyId] = glow
+	return glow
+end
+
+-- `strength` 0 turns the glow off; 1 is the strongest tint.
+local function setGlow(enemyId: string, model: Model, color: Color3, strength: number)
+	local glow = glowFor(enemyId, model)
+	if strength <= 0 then
+		glow.Enabled = false
+		return
+	end
+
+	glow.Enabled = true
+	glow.FillColor = color
+	glow.OutlineColor = color
+	glow.FillTransparency = 1 - strength * 0.7
+	glow.OutlineTransparency = 1 - strength
+end
+
+-- What an enemy looks like with no windup running.
+local function settle(enemyId: string, model: Model)
+	if dead[enemyId] then
+		setGlow(enemyId, model, DEAD_COLOR, DEAD_STRENGTH)
+		return
+	end
+
+	local until_ = staggeredUntil[enemyId]
+	if until_ and os.clock() < until_ then
+		setGlow(enemyId, model, STAGGER_COLOR, STAGGER_STRENGTH)
+		return
+	end
+
+	setGlow(enemyId, model, STAGGER_COLOR, 0)
 end
 
 -- A disc on the floor under the enemy, sized to the attack's hit volume.
@@ -143,6 +168,7 @@ local function endTelegraph(enemyId: string)
 	if telegraph.zone then
 		telegraph.zone:Destroy()
 	end
+	settle(enemyId, telegraph.model)
 end
 
 function TelegraphVFX.start()
@@ -156,59 +182,48 @@ function TelegraphVFX.start()
 		endTelegraph(payload.enemyId)
 		staggeredUntil[payload.enemyId] = nil
 
-		local peak = if payload.parryable then PARRYABLE_PEAK else UNPARRYABLE_PEAK
-
 		local zone: Part? = nil
-		local defId = defIdOf(model)
-		local def = if defId then EnemyDefs[defId] else nil
+		local defId = model:GetAttribute("EnemyDefId")
+		local def = if typeof(defId) == "string" then EnemyDefs[defId] else nil
 		local attack = def and def.attacks[payload.attackId]
 		if attack and attack.arcDegrees >= 360 then
-			zone = makeDangerZone(root, attack.range, peak)
+			zone = makeDangerZone(root, attack.range, if payload.parryable then PARRYABLE_PEAK else UNPARRYABLE_PEAK)
 		end
 
 		telegraphs[payload.enemyId] = {
+			model = model,
 			root = root,
 			startTime = payload.impactTime - payload.duration,
 			impactTime = payload.impactTime,
 			parryable = payload.parryable,
-			baseColor = baseColorFor(model),
 			zone = zone,
 		}
 	end)
 
 	Remotes.get("EnemyStaggered").OnClientEvent:Connect(function(payload)
-		local telegraph = telegraphs[payload.enemyId]
-		endTelegraph(payload.enemyId)
-
-		local root = telegraph and telegraph.root
-		if not root then
-			local model = findEnemyModel(payload.enemyId)
-			root = model and model.PrimaryPart
-		end
-
-		if not root then
-			return
-		end
-
 		-- Tracked rather than just painted, so a punish hit landing during the
-		-- stagger doesn't wipe the "punish now" colour.
+		-- stagger doesn't clear the "punish now" tint.
 		staggeredUntil[payload.enemyId] = os.clock() + payload.duration
-		root.Color = STAGGER_COLOR
+
+		local model = findEnemyModel(payload.enemyId)
+		if telegraphs[payload.enemyId] then
+			endTelegraph(payload.enemyId)
+		elseif model then
+			settle(payload.enemyId, model)
+		end
 	end)
 
 	Remotes.get("EnemyHealthChanged").OnClientEvent:Connect(function(payload)
+		dead[payload.enemyId] = not payload.alive or nil
+
 		local model = findEnemyModel(payload.enemyId)
-		local root = model and model.PrimaryPart
-		if not model or not root then
-			return
+		if not payload.alive then
+			staggeredUntil[payload.enemyId] = nil
+			endTelegraph(payload.enemyId)
 		end
 
-		if not payload.alive then
-			endTelegraph(payload.enemyId)
-			staggeredUntil[payload.enemyId] = nil
-			root.Color = DEAD_COLOR
-		elseif not telegraphs[payload.enemyId] then
-			root.Color = restingColor(payload.enemyId, model)
+		if model and not telegraphs[payload.enemyId] then
+			settle(payload.enemyId, model)
 		end
 	end)
 
@@ -218,7 +233,7 @@ function TelegraphVFX.start()
 
 		for enemyId, telegraph in telegraphs do
 			local duration = telegraph.impactTime - telegraph.startTime
-			if duration <= 0 or not telegraph.root.Parent then
+			if duration <= 0 or not telegraph.model.Parent then
 				endTelegraph(enemyId)
 				continue
 			end
@@ -228,32 +243,30 @@ function TelegraphVFX.start()
 			local zone = telegraph.zone
 
 			if progress > 1 + HOLD_AFTER_IMPACT then
-				telegraph.root.Color = telegraph.baseColor
 				endTelegraph(enemyId)
 			elseif progress >= 1 then
-				telegraph.root.Color = peak
+				setGlow(enemyId, telegraph.model, peak, 1)
 				if zone then
 					zone.Transparency = ZONE_IMPACT_TRANSPARENCY
 				end
 			else
 				local t = math.clamp(progress, 0, 1)
-				telegraph.root.Color = telegraph.baseColor:Lerp(peak, t)
+				setGlow(enemyId, telegraph.model, peak, t)
 				if zone then
 					zone.Transparency = ZONE_START_TRANSPARENCY + (ZONE_END_TRANSPARENCY - ZONE_START_TRANSPARENCY) * t
 				end
 			end
 		end
 
-		-- Clear stagger colours whose time is up.
+		-- Clear stagger tints whose time is up.
 		local clock = os.clock()
 		for enemyId, until_ in staggeredUntil do
 			if clock >= until_ then
 				staggeredUntil[enemyId] = nil
 				if not telegraphs[enemyId] then
 					local model = findEnemyModel(enemyId)
-					local root = model and model.PrimaryPart
-					if model and root then
-						root.Color = baseColorFor(model)
+					if model then
+						settle(enemyId, model)
 					end
 				end
 			end

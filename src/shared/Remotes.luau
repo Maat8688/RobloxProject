@@ -30,6 +30,7 @@ local REMOTE_EVENTS = {
 	"ParryResult",
 	"AttackResult",
 	"HealBurst",
+	"PlayerCombatAction",
 
 	-- Server -> Client: profile, equipment and economy
 	"ProfileLoaded",

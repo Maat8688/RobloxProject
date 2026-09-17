@@ -12,6 +12,8 @@ local Shared = ReplicatedStorage.Shared
 local Loadout = require(Shared.Loadout)
 local Remotes = require(Shared.Remotes)
 
+local PlayerAnimation = require(script.Parent.PlayerAnimation)
+
 local CombatClient = {}
 
 local PARRY_ACTION = "Parry"
@@ -58,6 +60,8 @@ function CombatClient.start()
 		-- server can compare this directly against its own clock — and against
 		-- its own estimate of when this could have been sent.
 		parryAttempt:FireServer({ timestamp = Workspace:GetServerTimeNow() })
+		-- Animated now rather than after a round trip; see PlayerAnimation.
+		PlayerAnimation.predictParry()
 
 		return Enum.ContextActionResult.Sink
 	end, true, Enum.KeyCode.F, Enum.KeyCode.ButtonL1)
@@ -72,6 +76,7 @@ function CombatClient.start()
 		-- No timestamp: a swing is not reactive, so the server has no reason to
 		-- trust client timing for it and simply resolves on its own clock.
 		attackRequest:FireServer()
+		PlayerAnimation.predictSwing()
 
 		return Enum.ContextActionResult.Sink
 	end, true, Enum.UserInputType.MouseButton1, Enum.KeyCode.ButtonR2)

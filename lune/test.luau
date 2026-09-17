@@ -22,6 +22,8 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local process = require("@lune/process")
 
+local SharedModules = require("./lib/sharedModules")
+
 local SHARED_DIR = "src/shared"
 local SPEC_DIR = "src/shared/__tests__"
 
@@ -32,84 +34,8 @@ if not fs.isDir(SHARED_DIR) then
 	process.exit(2)
 end
 
---[[ Sandboxed module loading ]]
-
--- Read every shared module up front: fs.readFile yields, and yielding isn't
--- allowed inside the __index metamethod that resolves `script.Parent.X`.
-local sources: { [string]: string } = {}
-for _, entry in fs.readDir(SHARED_DIR) do
-	local name = string.match(entry, "^(.+)%.luau$")
-	if name and fs.isFile(`{SHARED_DIR}/{entry}`) then
-		sources[name] = fs.readFile(`{SHARED_DIR}/{entry}`)
-	end
-end
-
-local loaded: { [string]: any } = {}
-local loading: { [string]: boolean } = {}
-local sharedFolder = {}
-
--- Pure modules require siblings as `require(script.Parent.Name)`, which the
--- proxy below has already resolved to the module's value.
-local function passThroughRequire(module: any): any
-	return module
-end
-
--- Roblox globals a pure module must never touch. Each is a trap that names the
--- rule it broke, rather than failing with a bare "attempt to index nil".
-local function robloxTrap(globalName: string)
-	return setmetatable({}, {
-		__index = function()
-			error(`{globalName} used by a shared module — pure modules must not call the Roblox API`, 2)
-		end,
-		__call = function()
-			error(`{globalName} used by a shared module — pure modules must not call the Roblox API`, 2)
-		end,
-	})
-end
-
-local function loadModule(name: string): any
-	if loaded[name] ~= nil then
-		return loaded[name]
-	end
-
-	local source = sources[name]
-	if not source then
-		error(`no shared module named "{name}"`, 3)
-	end
-
-	if loading[name] then
-		error(`circular require involving "{name}"`, 3)
-	end
-	loading[name] = true
-
-	local chunk = luau.load(source, {
-		debugName = `{SHARED_DIR}/{name}.luau`,
-		environment = {
-			script = { Parent = sharedFolder, Name = name },
-			require = passThroughRequire,
-			game = robloxTrap("game"),
-			workspace = robloxTrap("workspace"),
-			Instance = robloxTrap("Instance"),
-		},
-	})
-
-	-- Clear the in-progress flag even when loading fails, or every later
-	-- require of this module would misreport the failure as a cycle.
-	local ok, value = pcall(chunk)
-	loading[name] = nil
-	if not ok then
-		error(value, 0)
-	end
-
-	loaded[name] = value
-	return value
-end
-
-setmetatable(sharedFolder, {
-	__index = function(_, key)
-		return loadModule(key)
-	end,
-})
+-- Sandboxed: pure modules that touch the Roblox API fail the run.
+local sharedFolder = SharedModules.load(SHARED_DIR)
 
 --[[ Jest shim ]]
 
