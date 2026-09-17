@@ -51,20 +51,32 @@ rojo serve
 Lint the source with [selene](https://github.com/Kampfkarren/selene):
 
 ```sh
-selene src/ tests/
+selene src/ tests/ lune/
 ```
 
 ## Tests
 
 The combat and economy math lives in pure Luau modules with no Roblox API, and is
 covered by [Jest Lua](https://github.com/jsdotlua/jest-lua) specs in
-`src/shared/__tests__/`. They run from a separate place so no test code ships:
+`src/shared/__tests__/`.
+
+Run them from the terminal, no Studio needed:
+
+```sh
+lune run test              # every spec
+lune run test ParryMath    # only matching spec files
+```
+
+This runs the same spec files under [Lune](https://github.com/lune-org/lune), with the
+pure modules sandboxed so any Roblox API call from them fails the run. It exits
+non-zero on failure.
+
+To run them under real Jest instead, serve the separate test place (so no test code
+ships in the game), connect from Studio and press Play:
 
 ```sh
 rojo serve test.project.json
 ```
-
-Connect from Studio and press Play; results print to the output window.
 
 ## Layout
 

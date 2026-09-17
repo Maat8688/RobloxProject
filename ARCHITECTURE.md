@@ -88,6 +88,10 @@ src/client/            -> StarterPlayer.StarterPlayerScripts.Client
 tests/                 -> mounted only by test.project.json, never shipped
   jest.config.luau
   TestRunner.server.luau
+
+lune/                  -> not mapped by Rojo; Lune scripts run from the repo root
+  test.luau              -- `lune run test`: runs the same specs headless, with
+                         -- pure modules sandboxed away from the Roblox API
 ```
 
 **Pure-module rule.** `CombatConstants`, `ParryMath`, `DamageMath`,
@@ -95,7 +99,13 @@ tests/                 -> mounted only by test.project.json, never shipped
 `EconomyDefs` must not call any Roblox API. That is what keeps the combat and
 economy math unit-testable, and what lets the same specs run headless under
 Lune. Anything needing `game`, `workspace` or `Instance` belongs in the server
-or client layer, not in these files.
+or client layer, not in these files. `lune run test` enforces this for every
+module a spec loads: those globals are traps in its sandbox.
+
+**Spec rule.** A spec may only require pure shared modules, through
+`ReplicatedStorage.Shared`, and may only use the Jest matchers the Lune runner
+implements (`toBe`, `toEqual`, `toBeCloseTo`, `toBeNil`, and `never`). The
+runner fails loudly on anything else — extend it rather than working around it.
 
 **Single-owner rule.** Equipped weapon and upgrade levels live only in
 `EquipService`, inventory only in `InventoryService`, currency only in

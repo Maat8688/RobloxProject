@@ -122,6 +122,10 @@ changes to them.
   unparryable paths together is cheaper than retrofitting and re-tuning later.
 - **Combat math is pure Luau**, segregated from anything touching the Roblox
   API, so it can be unit-tested. See the pure-module rule in ARCHITECTURE.md.
+  *Paid off (Sept 2026):* the same specs now also run headless under Lune
+  (`lune run test`) with no rewrite, and that runner sandboxes the pure modules
+  so a stray Roblox call fails the run instead of silently making a module
+  untestable.
 
 ## Decisions made building the weapon/class framework (step 2, Sept 2026)
 
