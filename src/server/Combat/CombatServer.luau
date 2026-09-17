@@ -1,12 +1,17 @@
 --!strict
 -- The authority. Owns every enemy's state machine, validates every parry and
--- every swing, and is the only place damage or healing is applied.
+-- every swing, and is the only place PvE damage or healing is applied.
 --
--- The client's inputs are a parry timestamp, a swing request, and a weapon id.
--- All three are treated as untrusted: the timestamp is bounded-rewound, the
--- swing is resolved against server-side positions, and the weapon id is
--- checked against the definition table. Notably the client never names which
--- enemy it is parrying or swinging at — the server resolves both.
+-- The client's inputs are a parry timestamp, a swing request, and (in Studio
+-- only) a weapon id. All are treated as untrusted: the timestamp is checked
+-- against the server's own estimate of when it could have been sent, swings
+-- are resolved against server-side positions, and weapon ids are checked
+-- against the definition table. The client never names which enemy it is
+-- parrying or swinging at — the server resolves both.
+--
+-- This module also owns the ParryAttempt and AttackRequest listeners for
+-- PvP, routing a dueling player to PvPCombatServer, so one press can never be
+-- handled by both.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -14,6 +19,7 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage.Shared
+local AttackSelector = require(Shared.AttackSelector)
 local CombatConstants = require(Shared.CombatConstants)
 local DamageMath = require(Shared.DamageMath)
 local EnemyDefs = require(Shared.EnemyDefs)
@@ -21,24 +27,13 @@ local Loadout = require(Shared.Loadout)
 local ParryMath = require(Shared.ParryMath)
 local Remotes = require(Shared.Remotes)
 
+local Characters = require(script.Parent.Characters)
 local EnemyAI = require(script.Parent.EnemyAI)
+local PlayerCombatState = require(script.Parent.PlayerCombatState)
+local EquipService = require(script.Parent.Parent.EquipService)
+local PvPCombatServer = require(script.Parent.Parent.PvP.PvPCombatServer)
 
 local CombatServer = {}
-
--- How long a killed enemy stays down before coming back, so tuning can carry
--- on without restarting the session.
-local RESPAWN_DELAY = 3
-
-type PlayerState = {
-	weaponId: string,
-	stamina: number,
-	lockoutUntil: number,
-	staminaUpdatedAt: number,
-	-- Set by a successful parry; the Assassin's payoff window.
-	riposteUntil: number,
-	attackReadyAt: number,
-	swinging: boolean,
-}
 
 type ActiveAttack = {
 	enemyId: string,
@@ -54,88 +49,10 @@ type ActiveAttack = {
 	staggerDuration: number,
 }
 
-local playerStates: { [Player]: PlayerState } = {}
 local enemies: { [string]: EnemyAI.Enemy } = {}
--- Keyed by enemyId: at most one wind-up per enemy, but many across the room.
+-- Keyed by enemyId: at most one wind-up per enemy, but many across the dungeon.
 local activeAttacks: { [string]: ActiveAttack } = {}
-local encounterRunning = false
-
-local function getPlayerState(player: Player): PlayerState
-	local state = playerStates[player]
-	if state then
-		return state
-	end
-
-	local created: PlayerState = {
-		weaponId = Loadout.DEFAULT_WEAPON,
-		stamina = CombatConstants.MAX_STAMINA,
-		lockoutUntil = 0,
-		staminaUpdatedAt = Workspace:GetServerTimeNow(),
-		riposteUntil = 0,
-		attackReadyAt = 0,
-		swinging = false,
-	}
-	playerStates[player] = created
-	return created
-end
-
--- Regen is applied lazily rather than on a tick, so it stays exact regardless
--- of server framerate and costs nothing while nobody is acting.
-local function syncStamina(state: PlayerState, now: number)
-	local elapsed = math.max(now - state.staminaUpdatedAt, 0)
-	state.stamina = ParryMath.regenerateStamina(state.stamina, elapsed)
-	state.staminaUpdatedAt = now
-end
-
-local function toVec2(position: Vector3): DamageMath.Vec2
-	return { x = position.X, z = position.Z }
-end
-
-local function getCharacterRoot(player: Player): BasePart?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-
-	return character:FindFirstChild("HumanoidRootPart") :: BasePart?
-end
-
-local function getHumanoid(player: Player): Humanoid?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-
-	return character:FindFirstChildOfClass("Humanoid")
-end
-
-local function isAlive(player: Player): boolean
-	local humanoid = getHumanoid(player)
-	return humanoid ~= nil and humanoid.Health > 0
-end
-
--- Nearest living player, used both for enemy targeting and for deciding
--- whether an enemy has anyone to act on at all.
-local function getNearestPlayer(position: Vector3): (Player?, number)
-	local nearest: Player? = nil
-	local nearestDistance = math.huge
-
-	for _, player in Players:GetPlayers() do
-		local root = getCharacterRoot(player)
-		if not root or not isAlive(player) then
-			continue
-		end
-
-		local offset = root.Position - position
-		local distance = Vector3.new(offset.X, 0, offset.Z).Magnitude
-		if distance < nearestDistance then
-			nearest = player
-			nearestDistance = distance
-		end
-	end
-
-	return nearest, nearestDistance
-end
+local running = false
 
 local function broadcastEnemyHealth(enemy: EnemyAI.Enemy)
 	Remotes.get("EnemyHealthChanged"):FireAllClients({
@@ -146,15 +63,65 @@ local function broadcastEnemyHealth(enemy: EnemyAI.Enemy)
 	})
 end
 
---[[ Enemy attacks ]]
-
-local function resolveStrike(enemy: EnemyAI.Enemy, attack: ActiveAttack)
-	local playerHit = Remotes.get("PlayerHit")
-	local attackerPos = toVec2(enemy.root.Position)
-	local attackerFacing = toVec2(enemy.root.CFrame.LookVector)
+-- Nearest living player this enemy may act on: inside its room, out of the
+-- duel arena. Used for targeting and for deciding whether to act at all.
+local function getTarget(enemy: EnemyAI.Enemy): (Player?, number)
+	local position = enemy.root.Position
+	local nearest: Player? = nil
+	local nearestDistance = math.huge
 
 	for _, player in Players:GetPlayers() do
-		local root = getCharacterRoot(player)
+		local root = Characters.getRoot(player)
+		if not root or not Characters.isAlive(player) or PvPCombatServer.isDueling(player) then
+			continue
+		end
+
+		if not EnemyAI.canReach(enemy, root.Position) then
+			continue
+		end
+
+		local distance = DamageMath.horizontalDistance(Characters.flat(position), Characters.flat(root.Position))
+		if distance < nearestDistance then
+			nearest = player
+			nearestDistance = distance
+		end
+	end
+
+	return nearest, nearestDistance
+end
+
+--[[ Enemy attacks ]]
+
+-- Keeps ticking independently of the enemy, which may die, respawn or start
+-- another attack while the player is still bleeding. Stops early if the
+-- player's character is gone.
+local function applyBleed(player: Player, enemy: EnemyAI.Enemy, attackId: string, dot: EnemyDefs.DotDef)
+	task.spawn(function()
+		for _ = 1, dot.ticks do
+			task.wait(dot.tickInterval)
+
+			local humanoid = Characters.getHumanoid(player)
+			if not humanoid or humanoid.Health <= 0 then
+				return
+			end
+
+			humanoid:TakeDamage(dot.tickDamage)
+			Remotes.get("PlayerHit"):FireClient(player, {
+				amount = dot.tickDamage,
+				sourceId = enemy.id,
+				attackId = attackId,
+				bleed = true,
+			})
+		end
+	end)
+end
+
+local function resolveStrike(enemy: EnemyAI.Enemy, attack: ActiveAttack)
+	local attackerPos = Characters.flat(enemy.root.Position)
+	local attackerFacing = Characters.flat(enemy.root.CFrame.LookVector)
+
+	for _, player in Players:GetPlayers() do
+		local root = Characters.getRoot(player)
 		if not root then
 			continue
 		end
@@ -164,7 +131,7 @@ local function resolveStrike(enemy: EnemyAI.Enemy, attack: ActiveAttack)
 		local inVolume = DamageMath.isInHitVolume({
 			attackerPos = attackerPos,
 			attackerFacing = attackerFacing,
-			targetPos = toVec2(root.Position),
+			targetPos = Characters.flat(root.Position),
 			range = attack.def.range,
 			arcDegrees = attack.def.arcDegrees,
 		})
@@ -179,25 +146,32 @@ local function resolveStrike(enemy: EnemyAI.Enemy, attack: ActiveAttack)
 			continue
 		end
 
-		local humanoid = getHumanoid(player)
+		local humanoid = Characters.getHumanoid(player)
 		if humanoid then
+			-- TakeDamage rather than subtracting Health directly, so a
+			-- ForceField is respected.
 			humanoid:TakeDamage(damage)
 		end
 
-		playerHit:FireClient(player, {
+		Remotes.get("PlayerHit"):FireClient(player, {
 			amount = damage,
 			sourceId = enemy.id,
 			attackId = attack.attackId,
 		})
+
+		local dot = attack.def.dot
+		if dot then
+			applyBleed(player, enemy, attack.attackId, dot)
+		end
 	end
 end
 
--- Waits until `deadline`, returning early if the attack gets parried. Polled on
--- Heartbeat rather than task.wait(n) because the wait has to be interruptible.
-local function waitUntilOrInterrupted(deadline: number, attack: ActiveAttack): boolean
+-- Waits until `deadline`, returning early if the attack gets parried or the
+-- enemy dies. Polled on Heartbeat because the wait has to be interruptible.
+local function waitUntilOrInterrupted(deadline: number, enemy: EnemyAI.Enemy, attack: ActiveAttack): boolean
 	while Workspace:GetServerTimeNow() < deadline do
-		if attack.parried then
-			return true
+		if attack.parried or not enemy.alive then
+			return attack.parried
 		end
 		RunService.Heartbeat:Wait()
 	end
@@ -236,7 +210,7 @@ local function runAttack(enemy: EnemyAI.Enemy, attackId: string)
 	-- Hold the strike open past impact so a late-half parry has time to arrive.
 	-- See STRIKE_RESOLUTION_GRACE in CombatConstants for the tradeoff.
 	local interrupted =
-		waitUntilOrInterrupted(attack.impactTime + CombatConstants.STRIKE_RESOLUTION_GRACE, attack)
+		waitUntilOrInterrupted(attack.impactTime + CombatConstants.STRIKE_RESOLUTION_GRACE, enemy, attack)
 
 	activeAttacks[enemy.id] = nil
 
@@ -261,13 +235,13 @@ local function runAttack(enemy: EnemyAI.Enemy, attackId: string)
 	end
 end
 
--- One loop per enemy, so a staggered Shambler doesn't hold up a Spitter across
--- the room. Each loop only ever touches its own enemy's state.
+-- One loop per enemy, so a staggered enemy doesn't hold up another. Each loop
+-- only ever touches its own enemy's state.
 local function runEnemyLoop(enemy: EnemyAI.Enemy)
-	while encounterRunning do
+	while running do
 		task.wait(enemy.def.attackInterval)
 
-		if not encounterRunning then
+		if not running then
 			break
 		end
 
@@ -275,7 +249,7 @@ local function runEnemyLoop(enemy: EnemyAI.Enemy)
 			continue
 		end
 
-		local target, distance = getNearestPlayer(enemy.root.Position)
+		local target, distance = getTarget(enemy)
 		if not target or distance > enemy.def.aggroRange then
 			continue
 		end
@@ -287,39 +261,33 @@ local function runEnemyLoop(enemy: EnemyAI.Enemy)
 	end
 end
 
---[[ Player input ]]
+--[[ Kills ]]
 
-local function onEquipWeapon(player: Player, payload: unknown)
-	if typeof(payload) ~= "table" then
-		return
-	end
+local function onEnemyKilled(enemy: EnemyAI.Enemy, killer: Player)
+	EnemyAI.markDead(enemy)
+	-- Chest unlocks and payouts hang off this.
+	EnemyAI.fireDeath(enemy, killer)
 
-	local result = Loadout.resolve((payload :: any).weaponId)
-	if not result.ok then
-		return
-	end
+	task.delay(CombatConstants.ENEMY_RESPAWN_DELAY, function()
+		if running and enemies[enemy.id] == enemy then
+			EnemyAI.revive(enemy)
+			broadcastEnemyHealth(enemy)
+		end
+	end)
+end
 
-	local state = getPlayerState(player)
-	-- Switching mid-swing would let a player start a cheap fast swing and land
-	-- a heavy one, so the swap waits for the current swing to finish.
-	if state.swinging then
-		return
-	end
+--[[ Player swings ]]
 
-	state.weaponId = result.weaponId :: string
-
-	Remotes.get("WeaponEquipped"):FireClient(player, {
-		weaponId = result.weaponId,
-		classTag = result.classTag,
-	})
+local function attackResult(player: Player, payload: { [string]: any })
+	Remotes.get("AttackResult"):FireClient(player, payload)
 end
 
 -- Nearest enemy inside the swing volume. Swings hit one target: cleave across
 -- a group is a weapon property that doesn't exist yet, and giving it away free
--- would quietly trivialise multi-enemy fights the moment they arrived.
+-- would trivialise multi-enemy fights.
 local function findSwingTarget(root: BasePart, attack: { range: number, arcDegrees: number }): EnemyAI.Enemy?
-	local attackerPos = toVec2(root.Position)
-	local attackerFacing = toVec2(root.CFrame.LookVector)
+	local attackerPos = Characters.flat(root.Position)
+	local attackerFacing = Characters.flat(root.CFrame.LookVector)
 
 	local best: EnemyAI.Enemy? = nil
 	local bestDistance = math.huge
@@ -329,10 +297,11 @@ local function findSwingTarget(root: BasePart, attack: { range: number, arcDegre
 			continue
 		end
 
+		local targetPos = Characters.flat(enemy.root.Position)
 		local inVolume = DamageMath.isInHitVolume({
 			attackerPos = attackerPos,
 			attackerFacing = attackerFacing,
-			targetPos = toVec2(enemy.root.Position),
+			targetPos = targetPos,
 			range = attack.range,
 			arcDegrees = attack.arcDegrees,
 		})
@@ -341,7 +310,7 @@ local function findSwingTarget(root: BasePart, attack: { range: number, arcDegre
 			continue
 		end
 
-		local distance = (enemy.root.Position - root.Position).Magnitude
+		local distance = DamageMath.horizontalDistance(attackerPos, targetPos)
 		if distance < bestDistance then
 			best = enemy
 			bestDistance = distance
@@ -351,31 +320,40 @@ local function findSwingTarget(root: BasePart, attack: { range: number, arcDegre
 	return best
 end
 
-local function resolveSwing(player: Player, state: PlayerState, weaponId: string)
+local function resolveSwing(player: Player, weaponId: string)
+	-- Left during the windup. Touching their state now would re-create a record
+	-- that PlayerRemoving has already cleared.
+	if not player.Parent then
+		return
+	end
+
+	local state = PlayerCombatState.peek(player)
 	state.swinging = false
 
-	local attackResult = Remotes.get("AttackResult")
 	local weapon = Loadout.getDef(weaponId)
-
-	local root = getCharacterRoot(player)
+	local root = Characters.getRoot(player)
 	if not root then
-		attackResult:FireClient(player, { hit = false, reason = "no_target", damage = 0, riposte = false })
+		attackResult(player, { hit = false, reason = "no_target", damage = 0, riposte = false })
 		return
 	end
 
 	local target = findSwingTarget(root, weapon.attack)
 	if not target then
-		attackResult:FireClient(player, { hit = false, reason = "missed", damage = 0, riposte = false })
+		attackResult(player, { hit = false, reason = "missed", damage = 0, riposte = false })
 		return
 	end
 
 	local now = Workspace:GetServerTimeNow()
 	local riposteActive = now < state.riposteUntil
-	local damage = DamageMath.resolveOutgoing(weapon.attack.damage, riposteActive, weapon.payoff.riposteMultiplier)
+	local damage = DamageMath.resolveOutgoing(EquipService.getDamage(player, weaponId), {
+		targetStaggered = target.state == "staggered",
+		riposteActive = riposteActive,
+		riposteMultiplier = weapon.payoff.riposteMultiplier,
+	})
 
 	local killed = EnemyAI.applyDamage(target, damage)
 
-	attackResult:FireClient(player, {
+	attackResult(player, {
 		hit = true,
 		reason = "hit",
 		damage = damage,
@@ -385,62 +363,177 @@ local function resolveSwing(player: Player, state: PlayerState, weaponId: string
 	broadcastEnemyHealth(target)
 
 	if killed then
-		EnemyAI.markDead(target)
-		task.delay(RESPAWN_DELAY, function()
-			if encounterRunning and enemies[target.id] == target then
-				EnemyAI.revive(target)
-				broadcastEnemyHealth(target)
-			end
-		end)
+		onEnemyKilled(target, player)
 	end
 end
 
 local function onAttackRequest(player: Player)
-	local now = Workspace:GetServerTimeNow()
-	local state = getPlayerState(player)
-	syncStamina(state, now)
+	if PvPCombatServer.isDueling(player) then
+		PvPCombatServer.handleAttack(player)
+		return
+	end
 
-	local attackResult = Remotes.get("AttackResult")
+	local weaponId = EquipService.getWeaponId(player)
+	if not weaponId then
+		attackResult(player, { hit = false, reason = "unequipped", damage = 0, riposte = false })
+		return
+	end
+
+	local now = Workspace:GetServerTimeNow()
+	local state = PlayerCombatState.sync(player, now)
 
 	if state.swinging or now < state.attackReadyAt then
-		attackResult:FireClient(player, { hit = false, reason = "cooldown", damage = 0, riposte = false })
+		attackResult(player, { hit = false, reason = "cooldown", damage = 0, riposte = false })
 		return
 	end
 
-	local weaponId = state.weaponId
-	local def = Loadout.getDef(weaponId).attack
+	local attack = Loadout.getDef(weaponId).attack
 
-	if state.stamina < def.staminaCost then
-		attackResult:FireClient(player, { hit = false, reason = "exhausted", damage = 0, riposte = false })
+	if state.stamina < attack.staminaCost then
+		attackResult(player, { hit = false, reason = "exhausted", damage = 0, riposte = false })
 		return
 	end
 
-	state.stamina -= def.staminaCost
+	state.stamina -= attack.staminaCost
 	state.swinging = true
-	state.attackReadyAt = now + def.windup + def.cooldown
+	state.attackReadyAt = now + attack.windup + attack.cooldown
 
 	-- The weapon is captured now, so a swap landing mid-windup cannot change
 	-- which weapon this swing resolves as.
-	task.delay(def.windup, function()
-		resolveSwing(player, state, weaponId)
-	end)
+	task.delay(attack.windup, resolveSwing, player, weaponId)
 end
 
--- Every wind-up currently in flight, as parry candidates. Built fresh per
--- attempt rather than cached, because an attack can resolve between two
--- presses.
-local function collectParryCandidates(): { ParryMath.ParryCandidate }
+--[[ Player parries ]]
+
+-- Burst heal for the parrying player and every living player near them. A
+-- payoff read from WeaponDefs rather than a check on class name, so any
+-- future weapon can carry it.
+local function applyBurstHeal(healer: Player, amount: number, radius: number)
+	local healerRoot = Characters.getRoot(healer)
+	if not healerRoot then
+		return
+	end
+
+	local origin = Characters.flat(healerRoot.Position)
+
+	for _, player in Players:GetPlayers() do
+		local root = Characters.getRoot(player)
+		local humanoid = Characters.getHumanoid(player)
+		if not root or not humanoid or humanoid.Health <= 0 then
+			continue
+		end
+
+		if player ~= healer and DamageMath.horizontalDistance(origin, Characters.flat(root.Position)) > radius then
+			continue
+		end
+
+		local before = humanoid.Health
+		humanoid.Health = DamageMath.applyHealing(before, humanoid.MaxHealth, amount)
+
+		local healed = humanoid.Health - before
+		if healed > 0 then
+			Remotes.get("HealBurst"):FireClient(player, { amount = healed, healerName = healer.Name })
+		end
+	end
+end
+
+-- Every wind-up currently in flight, as parry candidates for this player.
+-- Built fresh per press, since an attack can resolve between two presses.
+local function collectParryCandidates(root: BasePart): { ParryMath.ParryCandidate }
+	local playerPos = Characters.flat(root.Position)
 	local candidates = {}
 
-	for _, attack in activeAttacks do
+	for enemyId, attack in activeAttacks do
+		local enemy = enemies[enemyId]
+		if not enemy then
+			continue
+		end
+
 		table.insert(candidates, {
-			enemyId = attack.enemyId,
+			enemyId = enemyId,
 			impactTime = attack.impactTime,
 			parryable = attack.def.parryable,
+			distance = DamageMath.horizontalDistance(playerPos, Characters.flat(enemy.root.Position)),
+			reach = attack.def.range + CombatConstants.PARRY_RANGE_MARGIN,
 		})
 	end
 
 	return candidates
+end
+
+local function handlePvEParry(player: Player, attemptTime: number, now: number)
+	local state = PlayerCombatState.sync(player, now)
+
+	local function respond(verdict: string, success: boolean, deltaMs: number, enemyId: string?)
+		Remotes.get("ParryResult"):FireClient(player, {
+			verdict = verdict,
+			success = success,
+			deltaMs = deltaMs,
+			stamina = state.stamina,
+			riposteUntil = state.riposteUntil,
+			enemyId = enemyId,
+		})
+	end
+
+	local weaponId = EquipService.getWeaponId(player)
+	local root = Characters.getRoot(player)
+	if not weaponId or not root then
+		respond("unequipped", false, 0, nil)
+		return
+	end
+
+	local readiness = ParryMath.checkReadiness(state.stamina, state.lockoutUntil, now)
+	if not readiness.allowed then
+		respond(readiness.reason :: string, false, 0, nil)
+		return
+	end
+
+	-- Spent before evaluating, so a whiff costs the same as a success. Parrying
+	-- on a read has to be a decision, not a free roll.
+	state.stamina -= CombatConstants.PARRY_STAMINA_COST
+
+	local candidate = ParryMath.selectParryTarget(collectParryCandidates(root), attemptTime)
+	local attack = if candidate then activeAttacks[candidate.enemyId] else nil
+	if not attack then
+		-- Nothing incoming that could reach this player: a whiff, so blind
+		-- mashing still burns stamina and eats the lockout.
+		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
+		respond("no_attack", false, 0, nil)
+		return
+	end
+
+	local weapon = Loadout.getDef(weaponId)
+	local evaluation = ParryMath.evaluate({
+		attemptTime = attemptTime,
+		serverNow = now,
+		halfPing = Characters.halfPing(player),
+		impactTime = attack.impactTime,
+		parryProfile = weapon.parry,
+		attackParryable = attack.def.parryable,
+	})
+
+	if not evaluation.success then
+		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
+		respond(evaluation.verdict, false, evaluation.deltaMs, attack.enemyId)
+		return
+	end
+
+	attack.parried = true
+	attack.parriedBy = player
+
+	-- Each class converts a parry into a different advantage.
+	local payoff = weapon.payoff
+	attack.staggerDuration = DamageMath.staggerDuration(CombatConstants.STAGGER_DURATION, payoff.staggerMultiplier)
+
+	if payoff.riposteDuration > 0 then
+		state.riposteUntil = now + payoff.riposteDuration
+	end
+
+	if payoff.burstHeal > 0 then
+		applyBurstHeal(player, payoff.burstHeal, payoff.burstHealRadius)
+	end
+
+	respond(evaluation.verdict, true, evaluation.deltaMs, attack.enemyId)
 end
 
 local function onParryAttempt(player: Player, payload: unknown)
@@ -455,129 +548,78 @@ local function onParryAttempt(player: Player, payload: unknown)
 	end
 
 	local now = Workspace:GetServerTimeNow()
-	local state = getPlayerState(player)
-	syncStamina(state, now)
 
-	local parryResult = Remotes.get("ParryResult")
-	local weapon = Loadout.getDef(state.weaponId)
-
-	local function respond(verdict: string, success: boolean, deltaMs: number, enemyId: string?)
-		parryResult:FireClient(player, {
-			verdict = verdict,
-			success = success,
-			deltaMs = deltaMs,
-			stamina = state.stamina,
-			riposteUntil = state.riposteUntil,
-			enemyId = enemyId,
-		})
-	end
-
-	local readiness = ParryMath.checkReadiness(state.stamina, state.lockoutUntil, now)
-	if not readiness.allowed then
-		respond(readiness.reason :: string, false, 0, nil)
-		return
-	end
-
-	-- Spending stamina before evaluating means a whiff costs the same as a
-	-- success. Parrying on a read has to be a decision, not a free roll.
-	state.stamina -= CombatConstants.PARRY_STAMINA_COST
-
-	-- The server picks which incoming attack this press is aimed at; the client
-	-- never names a target.
-	local candidate = ParryMath.selectParryTarget(collectParryCandidates(), attemptTime)
-	if not candidate then
-		-- Nothing incoming: treat as a whiff so blind mashing still burns
-		-- stamina and eats the lockout.
-		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
-		respond("no_attack", false, 0, nil)
-		return
-	end
-
-	local attack = activeAttacks[candidate.enemyId]
-	if not attack then
-		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
-		respond("no_attack", false, 0, nil)
-		return
-	end
-
-	local evaluation = ParryMath.evaluate({
-		attemptTime = attemptTime,
-		serverNow = now,
-		impactTime = attack.impactTime,
-		parryProfile = weapon.parry,
-		attackParryable = attack.def.parryable,
-	})
-
-	if evaluation.success then
-		attack.parried = true
-		attack.parriedBy = player
-		-- Each class converts a parry into a different advantage.
-		attack.staggerDuration =
-			DamageMath.staggerDuration(CombatConstants.STAGGER_DURATION, weapon.payoff.staggerMultiplier)
-
-		if weapon.payoff.riposteDuration > 0 then
-			state.riposteUntil = now + weapon.payoff.riposteDuration
-		end
-
-		if weapon.payoff.selfHeal > 0 then
-			local humanoid = getHumanoid(player)
-			if humanoid then
-				humanoid.Health =
-					DamageMath.applyHealing(humanoid.Health, humanoid.MaxHealth, weapon.payoff.selfHeal)
-			end
-		end
+	if PvPCombatServer.isDueling(player) then
+		PvPCombatServer.handleParry(player, attemptTime, now)
 	else
-		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
+		handlePvEParry(player, attemptTime, now)
+	end
+end
+
+--[[ Debug equip ]]
+
+-- Number-key weapon swapping, for comparing parry windows back to back while
+-- tuning. Studio only: in a live server the weapon stands are the one way to
+-- equip, and this remote does nothing.
+local function onEquipWeapon(player: Player, payload: unknown)
+	if not RunService:IsStudio() or typeof(payload) ~= "table" then
+		return
 	end
 
-	respond(evaluation.verdict, evaluation.success, evaluation.deltaMs, attack.enemyId)
+	-- Swapping mid-swing would let a player start a cheap fast swing and land a
+	-- heavy one.
+	if PlayerCombatState.peek(player).swinging then
+		return
+	end
+
+	EquipService.setWeapon(player, (payload :: any).weaponId)
 end
 
 --[[ Lifecycle ]]
 
-function CombatServer.start(spawns: { { defId: string, position: Vector3 } }, playerSpawn: Vector3)
-	assert(not encounterRunning, "CombatServer.start called twice")
+-- Spawns an enemy and starts its loop. `bounds` leashes it to its room.
+function CombatServer.spawnEnemy(
+	defId: string,
+	position: Vector3,
+	facePosition: Vector3,
+	bounds: AttackSelector.Bounds?,
+	parent: Instance?
+): EnemyAI.Enemy
+	assert(running, "CombatServer.start must be called before spawning enemies")
+
+	local enemy = EnemyAI.spawn(defId, position, facePosition, bounds, parent)
+	enemies[enemy.id] = enemy
+	broadcastEnemyHealth(enemy)
+	task.spawn(runEnemyLoop, enemy)
+	return enemy
+end
+
+function CombatServer.start()
+	assert(not running, "CombatServer.start called twice")
+	running = true
 
 	Remotes.get("ParryAttempt").OnServerEvent:Connect(onParryAttempt)
 	Remotes.get("AttackRequest").OnServerEvent:Connect(onAttackRequest)
 	Remotes.get("EquipWeapon").OnServerEvent:Connect(onEquipWeapon)
 
-	Players.PlayerRemoving:Connect(function(player)
-		playerStates[player] = nil
-	end)
-
-	-- Tell a joining player what they are holding, so the client never has to
-	-- assume a default that could drift from the server's.
+	-- A joining player needs every enemy's current health for the HUD.
 	Players.PlayerAdded:Connect(function(player)
-		local state = getPlayerState(player)
-		Remotes.get("WeaponEquipped"):FireClient(player, {
-			weaponId = state.weaponId,
-			classTag = Loadout.classOf(state.weaponId),
-		})
-
 		for _, enemy in enemies do
-			broadcastEnemyHealth(enemy)
+			Remotes.get("EnemyHealthChanged"):FireClient(player, {
+				enemyId = enemy.id,
+				health = enemy.health,
+				maxHealth = enemy.def.maxHealth,
+				alive = enemy.alive,
+			})
 		end
 	end)
-
-	encounterRunning = true
-
-	for _, spawn in spawns do
-		local enemy = EnemyAI.spawn(spawn.defId, spawn.position, playerSpawn)
-		enemies[enemy.id] = enemy
-		task.spawn(runEnemyLoop, enemy)
-	end
 
 	-- Movement steps every enemy on one Heartbeat rather than inside each
 	-- enemy's own loop, so they all move against the same frame delta.
 	RunService.Heartbeat:Connect(function(deltaTime)
-		if not encounterRunning then
-			return
-		end
-
 		for _, enemy in enemies do
-			local target = getNearestPlayer(enemy.root.Position)
-			local root = if target then getCharacterRoot(target) else nil
+			local target = getTarget(enemy)
+			local root = if target then Characters.getRoot(target) else nil
 			if root then
 				EnemyAI.step(enemy, root.Position, deltaTime)
 			end

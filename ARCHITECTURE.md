@@ -19,97 +19,155 @@
 ## Project layout (Rojo → Roblox services)
 
 Source folders are mapped by `default.project.json`. Files are `.luau`.
-Entries marked *(planned)* do not exist yet — see the build order in DESIGN.md.
+Module functions are lowerCamelCase (`CombatServer.start`). Entries marked
+*(planned)* do not exist yet — see the build order in DESIGN.md.
 
 ```
-src/shared/          -> ReplicatedStorage.Shared
-  CombatConstants.luau   -- parry windows, stagger, stamina, latency bounds
-  ParryMath.luau         -- parry window + timestamp validation (pure)
+src/shared/            -> ReplicatedStorage.Shared
+  CombatConstants.luau   -- shared combat tunables: timestamp authority, stamina,
+                         -- stagger + punish bonus, strike grace, respawn, PvP
+  ParryMath.luau         -- the whole parry decision: timestamp check, window,
+                         -- readiness, target selection (pure)
   DamageMath.luau        -- damage resolution + hit-reg geometry (pure)
+  AttackSelector.luau    -- enemy attack choice, movement intent, room leash (pure)
+  Loadout.luau           -- equip validation + class-from-weapon derivation (pure)
   WeaponDefs.luau        -- weaponId -> class, parry profile, attack, payoff
-  EnemyDefs.luau         -- enemyId -> stats, movement, attack timelines
-  Loadout.luau           -- equip validation + class-from-weapon derivation
-  AttackSelector.luau    -- enemy attack choice + movement intent (pure)
-  Remotes.luau           -- every RemoteEvent/RemoteFunction is created here,
+  EnemyDefs.luau         -- enemyId -> stats, movement, rewards, attack timelines
+  LootTables.luau        -- enemyId -> chest loot descriptor
+  EconomyDefs.luau       -- upgrade cost curve, tiers, upgraded damage (pure).
+                         -- Shared so the client can show a price; the server
+                         -- always recomputes before charging
+  Remotes.luau           -- every RemoteEvent is created here, from a fixed list;
                          -- nothing created ad hoc elsewhere
-  LootTables.luau        -- (planned) encounterGroupId -> possible drops
-  __tests__/             -- Jest specs, mounted by test.project.json
+  __tests__/             -- Jest specs, mounted by test.project.json only
 
-src/server/          -> ServerScriptService.Server
-  init.server.luau       -- bootstrap
+src/server/            -> ServerScriptService.Server
+  init.server.luau       -- bootstrap: combat, dungeon, stations, arena, spawning
+  EquipService.luau      -- the only owner of equipped weapon + upgrade levels
+  InventoryService.luau  -- the only owner of inventory
+  WeaponPickups.luau     -- weapon stands in the start room (ProximityPrompt)
   Combat/
-    CombatServer.luau    -- hit reg, parry validation, damage resolution
-    EnemyAI.luau         -- enemy rigs + attack selection
+    CombatServer.luau    -- the authority: enemy state machines, PvE parry and
+                         -- swing resolution, bleeds, burst heal. Owns the
+                         -- ParryAttempt/AttackRequest listeners for PvP too,
+                         -- routing duelists to PvPCombatServer
+    EnemyAI.luau         -- enemy rigs, movement, leash, death hooks
+    PlayerCombatState.luau -- per-player stamina, lockout, riposte, swing timing;
+                         -- one record shared by PvE and PvP
+    Characters.luau      -- character lookups + XZ projection + half-ping
   Dungeon/
-    RoomBuilder.luau     -- code-generated test room (slice only)
-    DungeonGenerator.luau  -- (planned)
-    RoomTemplates/         -- (planned) pre-built Room models w/ spawn points
-  Economy/               -- (planned) LootService, BlacksmithService
+    DungeonGenerator.luau -- straight chain of rooms + corridors; spawns each
+                         -- room's guard through CombatServer
+    RoomTemplates.luau   -- room geometry recipes (Empty/Pillars) returning the
+                         -- enemy spawn, chest spot and leash bounds. One module,
+                         -- not a folder — see DESIGN.md
+    ChestService.luau    -- one barrier-locked chest per room, unlocked on its
+                         -- guard's first death
+  Economy/
+    CurrencyService.luau -- the only owner of coins + class-keyed crystals; pays
+                         -- the killer via each enemy's death hook
+    BlacksmithService.luau -- the start-room anvil: prices an upgrade, takes
+                         -- payment, hands off to EquipService
+  PvP/
+    ArenaService.luau    -- the arena room, the duel queue, who duels whom
+    Duelist.luau         -- one side of a duel: state machine + virtual health
+    PvPCombatServer.luau -- resolves duel swings and parries on the PvE rules;
+                         -- listens on no remote itself
   DataService.luau       -- (planned) DataStore read/write, owns PlayerData
 
-src/client/          -> StarterPlayer.StarterPlayerScripts.Client
+src/client/            -> StarterPlayer.StarterPlayerScripts.Client
   init.client.luau       -- bootstrap
-  CombatClient.luau      -- input capture, parry timestamp send
-  TelegraphVFX.luau      -- windup/stagger visuals
+  CombatClient.luau      -- combat input: parry timestamp, swing request, and
+                         -- Studio-only 1/2/3 weapon swaps
+  CameraLock.luau        -- toggleable shift-lock camera (Left Shift)
+  TelegraphVFX.luau      -- windup/stagger/death colours on enemy rigs
+  GameUI.luau            -- player-facing UI: flashes, weapon, currency, loot,
+                         -- upgrades, inventory (I), duel status
   DebugHUD.luau          -- tuning readout (temporary; replaced at step 10)
-  UI/                    -- (planned)
 
-tests/               -> mounted only by test.project.json, never shipped
+tests/                 -> mounted only by test.project.json, never shipped
   jest.config.luau
   TestRunner.server.luau
 ```
 
-**Pure-module rule.** `CombatConstants`, `ParryMath`, `DamageMath`, `WeaponDefs`,
-`EnemyDefs`, `Loadout` and `AttackSelector` must not call any Roblox API. That is what keeps the combat math
-unit-testable, and it is what will let a headless Lune CI tier run the same
-specs without a rewrite. Anything needing `game`, `workspace` or `Instance`
-belongs in the server or client layer, not in these five files.
+**Pure-module rule.** `CombatConstants`, `ParryMath`, `DamageMath`,
+`AttackSelector`, `Loadout`, `WeaponDefs`, `EnemyDefs`, `LootTables` and
+`EconomyDefs` must not call any Roblox API. That is what keeps the combat and
+economy math unit-testable, and what lets the same specs run headless under
+Lune. Anything needing `game`, `workspace` or `Instance` belongs in the server
+or client layer, not in these files.
 
-## Naming registry — RemoteEvents / RemoteFunctions
+**Single-owner rule.** Equipped weapon and upgrade levels live only in
+`EquipService`, inventory only in `InventoryService`, currency only in
+`CurrencyService`, per-player combat resources only in `PlayerCombatState`.
+Everything else asks them.
+
+## Naming registry — RemoteEvents
+
+All payloads are a single table.
 
 | Name | Direction | Payload | Purpose |
 |---|---|---|---|
-| `ParryAttempt` | Client → Server | `{ timestamp }` | Player attempts a parry. `timestamp` is `workspace:GetServerTimeNow()` on the client |
-| `EnemyTelegraphStart` | Server → Client | `{ enemyId, attackId, duration, impactTime, parryable }` | Attack is winding up — VFX/audio cue. `impactTime` is absolute so a delayed packet doesn't shift the cue |
-| `PlayerHit` | Server → Client | `{ amount, sourceId, attackId }` | Damage feedback |
-| `ParryResult` | Server → Client | `{ verdict, success, deltaMs, stamina, riposteUntil, enemyId }` | Parry outcome. `deltaMs` is signed distance from impact, for HUD tuning. `enemyId` is which attack the server resolved the press against |
-| `EnemyStaggered` | Server → Client | `{ enemyId, duration }` | Enemy interrupted by a successful parry. `duration` is already scaled by the parrying class's payoff |
+| `ParryAttempt` | Client → Server | `{ timestamp }` | Player attempts a parry. `timestamp` is `workspace:GetServerTimeNow()` on the client; the server checks it against its own receipt-time estimate (`ParryMath.plausibleSendWindow`) |
 | `AttackRequest` | Client → Server | *(none)* | Player swings. Carries no timestamp — a swing isn't reactive, so the server resolves it on its own clock |
-| `AttackResult` | Server → Client | `{ hit, reason, damage, riposte }` | Swing outcome. `reason` is one of `hit`, `missed`, `cooldown`, `exhausted`, `no_target` |
-| `EquipWeapon` | Client → Server | `{ weaponId }` | Requests a weapon (and therefore class) change. Id is validated against `WeaponDefs` |
-| `WeaponEquipped` | Server → Client | `{ weaponId, classTag }` | Confirms the equipped weapon; also sent on join so the client never assumes a default |
-| `EnemyHealthChanged` | Server → Client | `{ enemyId, health, maxHealth, alive }` | Enemy damage and death/respawn |
-| `RequestUpgrade` | Client → Server (returns) | `{ itemId }` → `{ success, newStats?, error? }` | Blacksmith upgrade attempt |
-| `ChestOpened` | Server → Client | `{ chestId, loot[] }` | Fired when the guard encounter is cleared |
+| `EquipWeapon` | Client → Server | `{ weaponId }` | **Studio only** — the 1/2/3 debug swap. Ignored by a live server; weapon stands are the real equip path |
+| `EnemyTelegraphStart` | Server → Client | `{ enemyId, attackId, duration, impactTime, parryable }` | Attack is winding up. `impactTime` is absolute so a delayed packet doesn't shift the cue |
+| `EnemyStaggered` | Server → Client | `{ enemyId, duration }` | Enemy interrupted by a successful parry. `duration` is already scaled by the parrying class's payoff |
+| `EnemyHealthChanged` | Server → Client | `{ enemyId, health, maxHealth, alive }` | Enemy spawn, damage, death and respawn |
+| `PlayerHit` | Server → Client | `{ amount, sourceId, attackId, bleed? }` | Damage feedback. `sourceId` is an enemy id, or the attacker's name in a duel. `bleed` marks a damage-over-time tick |
+| `ParryResult` | Server → Client | `{ verdict, success, deltaMs, stamina, riposteUntil, enemyId? }` | Parry outcome, PvE and PvP. `deltaMs` is signed distance from impact. `enemyId` is what the press resolved against (the attacker's name in a duel) |
+| `AttackResult` | Server → Client | `{ hit, reason, damage, riposte, enemyId? }` | Swing outcome. `reason` is from the attack-result registry below |
+| `HealBurst` | Server → Client | `{ amount, healerName }` | Fired to each player actually healed by a parry-triggered burst heal |
+| `WeaponEquipped` | Server → Client | `{ weaponId, classTag, upgradeLevel }` | Fired on equip and whenever the equipped weapon's upgrade level changes |
+| `ChestOpened` | Server → Client | `{ chestId, loot }` | `loot` is a list holding one `LootTables` descriptor (display info, not the stored `ItemInstance`) |
+| `InventoryUpdated` | Server → Client | `{ items }` | The player's full `ItemInstance` list whenever it changes |
+| `CurrencyUpdated` | Server → Client | `{ coins, crystals }` | Whenever a balance changes; `crystals` is keyed by class |
+| `UpgradeResult` | Server → Client | `{ success, reason?, newLevel? }` | Blacksmith outcome; `reason` is player-facing refusal text |
+| `PvPStatusChanged` | Server → Client | `{ status, opponentName?, message? }` | `status` is `idle` \| `queued` \| `dueling`; `message` is set when a duel ends |
+| `PvPTelegraphStart` | Server → Client | `{ attackerName, duration, impactTime }` | Sent to the defending duelist when their opponent swings |
+| `PvPParryResult` | Server → Client | `{ success, message }` | Sent to both duelists when a duel swing is parried |
+| `PvPHealthChanged` | Server → Client | `{ yours, opponent }` | Both duelists' virtual health, whenever either changes |
 | *(add new rows here as they're built)* | | | |
 
-## Naming registry — Classes / weapon types
+### Retired remote names
+
+Planned or built under these names at some point; none exist now. Don't reuse
+them for something different.
+
+| Name | Fate |
+|---|---|
+| `RequestUpgrade` | Planned RemoteFunction, never built — the blacksmith is a `ProximityPrompt`, and the outcome goes over `UpgradeResult` (see DESIGN.md) |
+| `AttackAttempt` | Maat8688's fork name for `AttackRequest`; retired at the merge |
+| `EnemyStateChanged` | Maat8688's fork; replaced at the merge by `EnemyTelegraphStart`, `EnemyStaggered` and `EnemyHealthChanged` |
+
+## Naming registry — Classes
 
 | Id | Weapon type | Status | Notes |
 |---|---|---|---|
-| `Tank` | Sword + Shield | built | Wide/forgiving parry window; shield-bash counter is currently the extended stagger |
-| `Assassin` | Daggers | built | Tight parry window, high payoff — currently the riposte window, backstabs still to come |
-| `Healer` | Staff / Mace | partial | Self-heal on parry built; "parry near allies triggers burst heal" needs allies (step 8) |
-| `Mage` | Staff / Wand | not built | Exception — magic replaces basic combat, not just enhances it |
+| `Tank` | Sword + Shield | built | Widest parry window; its payoff is the longest stagger, i.e. the longest double-damage window for the group. A distinct shield-bash counter isn't built |
+| `Assassin` | Daggers | built | Tightest window, highest payoff — currently the riposte. Backstab is unblocked (enemies now have a facing) but not built |
+| `Healer` | Staff / Mace | built | Parries trigger a burst heal that reaches allies |
+| `Mage` | Staff / Wand | not built | Exception — magic replaces basic combat, not just enhances it. Needs its own combat model, deliberately not a `WeaponDefs` row yet |
 | *(add new rows here as they're built)* | | | |
 
 ## Naming registry — Weapons
 
 Class is derived from the weapon, so this table *is* the class roster. There is
-deliberately no `ClassDefs` module — see the class-derivation rule below.
+deliberately no `ClassDefs` module. Exact numbers live in `WeaponDefs.luau`;
+this table is the summary.
 
-| Id | Class | Parry window | Parry payoff |
-|---|---|---|---|
-| `SwordAndShield` | `Tank` | 200/100 ms — widest | Control: 1.5× stagger duration |
-| `Daggers` | `Assassin` | 80/50 ms — tightest | Damage: 2.5× for 2.5 s (riposte) |
-| `Staff` | `Healer` | 140/80 ms | Sustain: 14 hp self-heal |
-| *(add new rows here as they're built)* | | | |
+| Id | Class | Parry window | Parry payoff | PvP telegraph |
+|---|---|---|---|---|
+| `SwordAndShield` | `Tank` | 200/100 ms — widest | Control: 1.5× stagger duration | 0.50 s |
+| `Daggers` | `Assassin` | 80/50 ms — tightest | Damage: 2.5× for 2.5 s (riposte) | 0.30 s |
+| `Staff` | `Healer` | 140/80 ms | Sustain: 25 hp burst heal, 20-stud radius | 0.45 s |
+| *(add new rows here as they're built)* | | | | |
 
 **Class-derivation rule.** A player's class is never stored. It is always read
-from their equipped weapon's `classTag` via `Loadout.classOf`, which is what
-makes "switching weapon switches class" true by construction rather than by
-remembering to keep two fields in sync. Adding a class means adding a row to
-`WeaponDefs` — it should not require new code.
+from their equipped weapon's `classTag` via `Loadout.classOf`, which makes
+"switching weapon switches class" true by construction. Adding a class means
+adding a row to `WeaponDefs` — there should never be an
+`if classTag == "..."` branch anywhere in combat.
 
 ## Naming registry — Enemies / attacks
 
@@ -118,64 +176,130 @@ Behaviour is data, not code. An enemy is defined by its attack bands
 weights its options — a charging melee type and a kiting ranged type come out of
 the same `AttackSelector` with no per-enemy branches. **If a new enemy needs a
 branch in `AttackSelector`, the behaviour belongs in `EnemyDefs` as data
-instead.**
+instead.** Every enemy is leashed to its room, and any enemy type can guard a
+chest, so a new enemy also needs a `LootTables` row.
 
-| Enemy id | Role | Attack id | Parryable | Notes |
-|---|---|---|---|---|
-| `TrainingDummy` | stationary | `Overhead` | yes | Baseline parryable attack |
-| `TrainingDummy` | | `GroundSlam` | **no** | Must-dodge; exists so combat isn't "parry everything" |
-| `Shambler` | melee, closes | `Claw` | yes | Fast pressure at touching range |
-| `Shambler` | | `Lunge` | yes | Gap-closer, `minRange` 9 so it reads as a lunge not a swing |
-| `Spitter` | ranged, kites | `Spit` | yes | Narrow 25° cone at range |
-| `Spitter` | | `Spray` | **no** | Point-blank panic option, so closing the gap isn't a free win |
-| *(add new rows here as they're built)* | | | | |
+| Enemy id | Role | Rewards | Attack id | Parryable | Notes |
+|---|---|---|---|---|---|
+| `TrainingDummy` | stationary | 10 coins | `Overhead` | yes | Baseline parryable attack |
+| | | | `GroundSlam` | **no** | Must-dodge; exists so combat isn't "parry everything" |
+| `SkeletonWarrior` | melee, tough | 25 coins, 1 crystal | `Slash` | yes | Quick parryable swing |
+| | | | `GroundSlam` | **no** | Hit volume (14) wider than its use range (10); leaves a bleed |
+| `Shambler` | melee, closes | 15 coins | `Claw` | yes | Fast pressure at touching range |
+| | | | `Lunge` | yes | Gap-closer, `minRange` 9 so it reads as a lunge, not a swing |
+| `Spitter` | ranged, kites | 15 coins | `Spit` | yes | Narrow 25° cone at range |
+| | | | `Spray` | **no** | Point-blank panic option, so closing the gap isn't a free win |
+| *(add new rows here as they're built)* | | | | | |
+
+Enemy models carry the attributes `EnemyId` and `EnemyDefId`.
+
+## Naming registry — CollectionService tags
+
+| Tag | On | Purpose |
+|---|---|---|
+| `Enemy` | every enemy model | Client lookup by `EnemyId` wherever the model is parented (`EnemyAI.TAG`) |
 
 ## Naming registry — Parry verdicts
 
-Returned by `ParryMath.evaluate` / `ParryMath.checkReadiness`, sent over
-`ParryResult`, and colour-mapped in `DebugHUD`. Adding a verdict means touching
-all three.
+Produced by `ParryMath` and the combat servers, sent over `ParryResult`, and
+colour-mapped in `DebugHUD`. Adding a verdict means touching all three.
 
 | Verdict | Meaning |
 |---|---|
 | `parried` | Inside the window — the only successful verdict |
 | `early` / `late` | Outside the window on that side |
 | `unparryable` | Attack cannot be parried at any timing |
-| `rejected_future` / `rejected_stale` | Timestamp failed server sanity checks |
-| `no_attack` | Pressed with nothing incoming; still costs stamina |
+| `rejected_future` | Claimed a later press than a message arriving now could have been sent |
+| `rejected_stale` | Claimed an earlier press than the player's connection accounts for |
+| `no_attack` | Nothing incoming within reach; still costs stamina and the lockout |
 | `exhausted` / `recovering` | Blocked before timing was even evaluated |
+| `unequipped` | No weapon picked up yet |
 
-## Naming registry — Encounter / loot tags
+## Naming registry — Attack results
+
+`AttackResult.reason` values.
+
+| Reason | Meaning |
+|---|---|
+| `hit` | Landed |
+| `missed` | Nothing inside the swing volume |
+| `cooldown` | Still swinging, or the weapon's cooldown hasn't elapsed |
+| `exhausted` | Not enough stamina |
+| `unequipped` | No weapon picked up yet |
+| `no_target` | No character to swing from |
+
+## Naming registry — Loot
+
+| Item id | Dropped by | Rarity |
+|---|---|---|
+| `PracticeToken` | `TrainingDummy` chest | common |
+| `BoneHiltShard` | `SkeletonWarrior` chest | uncommon |
+| `RottedClaw` | `Shambler` chest | common |
+| `AcidGland` | `Spitter` chest | common |
+| *(add new rows here as they're built)* | | |
+
+Every combat room's enemy guards that room's chest 1:1 (`ChestService`).
+`encounterGroupId` stays unused until a chest needs a real multi-enemy group.
+
+## Naming registry — Currencies
 
 | Id | Meaning |
 |---|---|
-| *(empty — populate as encounter groups and loot pools are built)* | |
+| `coins` | Common currency, paid by every kill (`EnemyDefs.coinReward`) |
+| `crystals` | Keyed by **class** — `crystals.Tank`, `crystals.Assassin`, `crystals.Healer`. You earn the class you had equipped when the kill landed, so crystals don't carry across a respec. Only tougher enemies pay them (`EnemyDefs.crystalReward`) |
+
+There is no separate crystal-type namespace: a crystal type *is* a Classes
+entry. Adding a class adds its crystal type for free — don't invent a parallel
+`TankCrystal`-style id.
 
 ## Data schemas
 
 ```lua
--- PlayerData
+-- PlayerData (planned — nothing is persisted until DataService exists)
 {
   coins: number,
-  crystals: { [crystalType]: number },
-  equipped: { weapon: itemId, chest: itemId?, boots: itemId? },
-  inventory: { [itemId]: ItemInstance },
+  crystals: { [classTag]: number },
+  equipped: { weapon: weaponId, chest: itemId?, boots: itemId? },
+  upgradeLevels: { [weaponId]: number },
+  inventory: { ItemInstance },  -- a list, not keyed by itemId: a player can
+                                -- hold several copies of one item, each with
+                                -- its own upgradeLevel
 }
 
--- ItemInstance
+-- ItemInstance (InventoryService.ItemInstance)
 {
   itemId: string,
-  rarity: string,        -- "common" | "rare" | "epic" ...
+  rarity: string,        -- "common" | "uncommon" | "rare" | "epic" ...
   upgradeLevel: number,
-  classTag: string,      -- must match a Classes entry above
+  classTag: string?,     -- a Classes entry, or nil for a class-neutral
+                         -- material or memento (see LootTables)
 }
 
--- EnemyDef
+-- EnemyDef (EnemyDefs.EnemyDef)
 {
-  enemyId: string,
-  encounterGroupId: string?,   -- set if this enemy guards a chest
+  displayName: string,
+  maxHealth: number,
+  attackInterval: number,
+  preferredRange: number,  -- distance it tries to hold; drives approach/retreat
+  moveSpeed: number,       -- 0 = stationary
+  aggroRange: number,
+  coinReward: number,      -- paid to whoever lands the killing blow
+  crystalReward: number,   -- 0 for trash mobs; gates the higher upgrade tiers
+  encounterGroupId: string?, -- (planned) for multi-enemy chest guards
   attacks: {
-    [attackId]: { telegraphDuration: number, parryable: boolean },
+    [attackId]: {
+      telegraphDuration: number,
+      parryable: boolean,  -- false = must-dodge; no timing blocks it
+      damage: number,
+      range: number,       -- hit volume, and how close a player must be to parry it
+      arcDegrees: number,
+      minRange: number,    -- band in which the attack is a legal choice
+      maxRange: number,
+      weight: number,
+      cooldown: number,
+      dot: { tickDamage: number, tickInterval: number, ticks: number }?,
+                           -- bleed applied on an unparried hit
+    },
   },
 }
 ```

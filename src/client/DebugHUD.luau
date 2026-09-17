@@ -6,13 +6,14 @@
 -- every attempt, next to the ping that explains it, so the constants in
 -- CombatConstants and WeaponDefs can be moved on evidence.
 --
--- With several enemies winding up at once, the readout tracks the SAME attack
--- the server would resolve a parry against — nearest impact to now, mirroring
--- ParryMath.selectParryTarget. A HUD that highlighted a different enemy than
--- the one the parry will hit would actively mislead a tuning session.
+-- The target readout mirrors the server's rule exactly — ParryMath's
+-- selectParryTarget over attacks within reach — because a HUD highlighting a
+-- different attack than the one a parry will resolve against would actively
+-- mislead a tuning session.
 --
 -- Replaced by real UI at build-order step 10.
 
+local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -21,20 +22,31 @@ local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage.Shared
 local CombatConstants = require(Shared.CombatConstants)
+local DamageMath = require(Shared.DamageMath)
+local EnemyDefs = require(Shared.EnemyDefs)
 local Loadout = require(Shared.Loadout)
 local ParryMath = require(Shared.ParryMath)
 local Remotes = require(Shared.Remotes)
 
 local DebugHUD = {}
 
+-- A strike resolves at impact plus the grace period; past this the telegraph
+-- is certainly over, whatever happened to it.
+local TELEGRAPH_EXPIRY = CombatConstants.STRIKE_RESOLUTION_GRACE + 0.5
+
+local GREY = Color3.fromRGB(150, 150, 150)
+local WHITE = Color3.fromRGB(235, 235, 235)
+local ORANGE = Color3.fromRGB(255, 140, 60)
+
 local VERDICT_COLORS: { [string]: Color3 } = {
 	parried = Color3.fromRGB(120, 230, 140),
 	early = Color3.fromRGB(240, 200, 100),
 	late = Color3.fromRGB(240, 200, 100),
-	unparryable = Color3.fromRGB(255, 140, 60),
+	unparryable = ORANGE,
 	no_attack = Color3.fromRGB(180, 180, 180),
 	exhausted = Color3.fromRGB(180, 180, 180),
 	recovering = Color3.fromRGB(180, 180, 180),
+	unequipped = Color3.fromRGB(180, 180, 180),
 	rejected_future = Color3.fromRGB(255, 90, 90),
 	rejected_stale = Color3.fromRGB(255, 90, 90),
 }
@@ -43,17 +55,17 @@ type Telegraph = {
 	attackId: string,
 	impactTime: number,
 	parryable: boolean,
+	root: BasePart?,
+	reach: number,
 }
 
 type EnemyInfo = {
-	health: number,
-	maxHealth: number,
 	alive: boolean,
 }
 
 type State = {
-	weaponId: string,
-	classTag: string,
+	weaponId: string?,
+	classTag: string?,
 	telegraphs: { [string]: Telegraph },
 	enemies: { [string]: EnemyInfo },
 	stamina: number,
@@ -61,13 +73,13 @@ type State = {
 	riposteUntil: number,
 	lastVerdict: string?,
 	lastDeltaMs: number,
-	lastParryEnemy: string?,
+	lastParryTarget: string?,
 	lastSwing: string?,
 }
 
 local state: State = {
-	weaponId = Loadout.DEFAULT_WEAPON,
-	classTag = Loadout.classOf(Loadout.DEFAULT_WEAPON),
+	weaponId = nil,
+	classTag = nil,
 	telegraphs = {},
 	enemies = {},
 	stamina = CombatConstants.MAX_STAMINA,
@@ -75,7 +87,7 @@ local state: State = {
 	riposteUntil = 0,
 	lastVerdict = nil,
 	lastDeltaMs = 0,
-	lastParryEnemy = nil,
+	lastParryTarget = nil,
 	lastSwing = nil,
 }
 
@@ -84,7 +96,7 @@ local function makeLabel(parent: Instance, order: number, size: number): TextLab
 	label.BackgroundTransparency = 1
 	label.Font = Enum.Font.Code
 	label.TextSize = size
-	label.TextColor3 = Color3.fromRGB(235, 235, 235)
+	label.TextColor3 = WHITE
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.Size = UDim2.new(1, 0, 0, size + 6)
 	label.LayoutOrder = order
@@ -92,15 +104,54 @@ local function makeLabel(parent: Instance, order: number, size: number): TextLab
 	return label
 end
 
--- Same rule the server uses to pick a parry target, so the HUD and the
--- authority never disagree about what you're about to parry.
-local function soonestTelegraph(now: number): (string?, Telegraph?)
+-- Server-side EnemyAI tags every enemy model with this.
+local ENEMY_TAG = "Enemy"
+
+local function findEnemyModel(enemyId: string): Model?
+	for _, tagged in CollectionService:GetTagged(ENEMY_TAG) do
+		if tagged:IsA("Model") and tagged:GetAttribute("EnemyId") == enemyId then
+			return tagged
+		end
+	end
+
+	return nil
+end
+
+local function reachOf(model: Model, attackId: string): number
+	local defId = model:GetAttribute("EnemyDefId")
+	local def = if typeof(defId) == "string" then EnemyDefs[defId] else nil
+	local attack = def and def.attacks[attackId]
+	-- Unknown attack: don't filter it out, since hiding a real threat is worse
+	-- than over-showing one.
+	if not attack then
+		return math.huge
+	end
+
+	return attack.range + CombatConstants.PARRY_RANGE_MARGIN
+end
+
+-- Same candidates and same rule the server uses for a press made right now.
+local function currentTarget(now: number): (string?, Telegraph?)
+	local character = Players.LocalPlayer.Character
+	local myRoot = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local candidates: { ParryMath.ParryCandidate } = {}
+
 	for enemyId, telegraph in state.telegraphs do
+		local enemyRoot = telegraph.root
+		local distance: number? = nil
+		if myRoot and enemyRoot then
+			distance = DamageMath.horizontalDistance(
+				{ x = myRoot.Position.X, z = myRoot.Position.Z },
+				{ x = enemyRoot.Position.X, z = enemyRoot.Position.Z }
+			)
+		end
+
 		table.insert(candidates, {
 			enemyId = enemyId,
 			impactTime = telegraph.impactTime,
 			parryable = telegraph.parryable,
+			distance = distance,
+			reach = telegraph.reach,
 		})
 	end
 
@@ -122,7 +173,7 @@ function DebugHUD.start()
 	gui.Parent = player:WaitForChild("PlayerGui")
 
 	local frame = Instance.new("Frame")
-	frame.Size = UDim2.fromOffset(400, 250)
+	frame.Size = UDim2.fromOffset(420, 250)
 	frame.Position = UDim2.fromOffset(16, 16)
 	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 	frame.BackgroundTransparency = 0.25
@@ -156,17 +207,20 @@ function DebugHUD.start()
 	end)
 
 	Remotes.get("EnemyTelegraphStart").OnClientEvent:Connect(function(payload)
+		local model = findEnemyModel(payload.enemyId)
 		state.telegraphs[payload.enemyId] = {
 			attackId = payload.attackId,
 			impactTime = payload.impactTime,
 			parryable = payload.parryable,
+			root = model and model.PrimaryPart,
+			reach = if model then reachOf(model, payload.attackId) else math.huge,
 		}
 	end)
 
 	Remotes.get("ParryResult").OnClientEvent:Connect(function(payload)
 		state.lastVerdict = payload.verdict
 		state.lastDeltaMs = payload.deltaMs
-		state.lastParryEnemy = payload.enemyId
+		state.lastParryTarget = payload.enemyId
 		-- Authoritative values; the readout predicts forward from here.
 		state.stamina = payload.stamina
 		state.staminaAt = Workspace:GetServerTimeNow()
@@ -178,12 +232,7 @@ function DebugHUD.start()
 	end)
 
 	Remotes.get("EnemyHealthChanged").OnClientEvent:Connect(function(payload)
-		state.enemies[payload.enemyId] = {
-			health = payload.health,
-			maxHealth = payload.maxHealth,
-			alive = payload.alive,
-		}
-
+		state.enemies[payload.enemyId] = { alive = payload.alive }
 		if not payload.alive then
 			state.telegraphs[payload.enemyId] = nil
 		end
@@ -191,61 +240,71 @@ function DebugHUD.start()
 
 	Remotes.get("AttackResult").OnClientEvent:Connect(function(payload)
 		if payload.hit then
-			state.lastSwing = string.format(
-				"hit %d%s",
-				payload.damage,
-				if payload.riposte then "  RIPOSTE" else ""
-			)
+			state.lastSwing = string.format("hit %.1f%s", payload.damage, if payload.riposte then "  RIPOSTE" else "")
 		else
 			state.lastSwing = payload.reason
 		end
 	end)
 
 	Remotes.get("PlayerHit").OnClientEvent:Connect(function(payload)
-		resultLabel.Text = `HIT  -{payload.amount}`
+		resultLabel.Text = string.format("%s  -%.0f", if payload.bleed then "BLEED" else "HIT", payload.amount)
 		resultLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
 	end)
 
 	RunService.RenderStepped:Connect(function()
 		local now = Workspace:GetServerTimeNow()
-		local weapon = Loadout.getDef(state.weaponId)
-		local profile = weapon.parry
 
-		classLabel.Text = `class    {state.classTag}  ({weapon.displayName})   [1/2/3]`
+		-- A strike that landed unparried sends no event of its own, so expire
+		-- telegraphs by time rather than leaving them to pile up.
+		for enemyId, telegraph in state.telegraphs do
+			if now > telegraph.impactTime + TELEGRAPH_EXPIRY then
+				state.telegraphs[enemyId] = nil
+			end
+		end
 
-		local targetId, telegraph = soonestTelegraph(now)
+		local weaponId = state.weaponId
+		local weapon = if weaponId then Loadout.getDef(weaponId) else nil
 
+		if weapon then
+			local hint = if RunService:IsStudio() then "   [1/2/3]" else ""
+			classLabel.Text = `class    {state.classTag}  ({weapon.displayName}){hint}`
+			classLabel.TextColor3 = WHITE
+		else
+			classLabel.Text = "class    none — pick a weapon from a stand"
+			classLabel.TextColor3 = ORANGE
+		end
+
+		local targetId, telegraph = currentTarget(now)
 		if targetId and telegraph then
 			local kind = if telegraph.parryable then "PARRYABLE" else "UNPARRYABLE"
 			targetLabel.Text = `target   {targetId}  {telegraph.attackId}  [{kind}]`
-			targetLabel.TextColor3 = if telegraph.parryable
-				then Color3.fromRGB(235, 235, 235)
-				else Color3.fromRGB(255, 140, 60)
-
-			local remaining = (telegraph.impactTime - now) * 1000
-			countdownLabel.Text = string.format("impact   %+.0f ms", remaining)
+			targetLabel.TextColor3 = if telegraph.parryable then WHITE else ORANGE
+			countdownLabel.Text = string.format("impact   %+.0f ms", (telegraph.impactTime - now) * 1000)
 		else
-			targetLabel.Text = "target   none incoming"
-			targetLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+			targetLabel.Text = "target   none in reach"
+			targetLabel.TextColor3 = GREY
 			countdownLabel.Text = "impact   --"
 		end
 
-		-- Absolute bounds of the window, so you can see exactly where the
-		-- press needed to land relative to the countdown above.
-		windowLabel.Text = string.format(
-			"window   %+.0f ms .. %+.0f ms   (%.0f ms wide)",
-			-profile.earlyTolerance * 1000,
-			profile.lateTolerance * 1000,
-			(profile.earlyTolerance + profile.lateTolerance) * 1000
-		)
+		if weapon then
+			local profile = weapon.parry
+			windowLabel.Text = string.format(
+				"window   %+.0f ms .. %+.0f ms   (%.0f ms wide)",
+				-profile.earlyTolerance * 1000,
+				profile.lateTolerance * 1000,
+				(profile.earlyTolerance + profile.lateTolerance) * 1000
+			)
+		else
+			windowLabel.Text = "window   --"
+		end
 
 		local predicted = ParryMath.regenerateStamina(state.stamina, now - state.staminaAt)
 		staminaLabel.Text = string.format(
-			"stamina  %d / %d   (parry %d, swing %d)",
+			"stamina  %d / %d   (parry %d, swing %s)",
 			math.floor(predicted),
 			CombatConstants.MAX_STAMINA,
 			CombatConstants.PARRY_STAMINA_COST,
-			weapon.attack.staminaCost
+			if weapon then tostring(weapon.attack.staminaCost) else "--"
 		)
 
 		local alive, total, winding = 0, 0, 0
@@ -258,10 +317,10 @@ function DebugHUD.start()
 		for _ in state.telegraphs do
 			winding += 1
 		end
-		roomLabel.Text = string.format("room     %d/%d alive   %d winding up", alive, total, winding)
+		roomLabel.Text = string.format("dungeon  %d/%d alive   %d winding up", alive, total, winding)
 
-		-- Ping is here because it explains late verdicts and bounds how much of
-		-- STRIKE_RESOLUTION_GRACE a real player actually gets to use.
+		-- Ping explains late verdicts, and sets how wide a timestamp band the
+		-- server will believe (ParryMath.plausibleSendWindow).
 		local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 		pingLabel.Text = string.format("ping     %.0f ms", ping)
 
@@ -275,17 +334,17 @@ function DebugHUD.start()
 		end
 
 		if state.lastVerdict then
-			local against = if state.lastParryEnemy then `  vs {state.lastParryEnemy}` else ""
+			local against = if state.lastParryTarget then `  vs {state.lastParryTarget}` else ""
 			resultLabel.Text = string.format(
 				"%s  %+.0f ms%s",
 				string.upper(state.lastVerdict),
 				state.lastDeltaMs,
 				against
 			)
-			resultLabel.TextColor3 = VERDICT_COLORS[state.lastVerdict] or Color3.fromRGB(235, 235, 235)
+			resultLabel.TextColor3 = VERDICT_COLORS[state.lastVerdict] or WHITE
 		else
-			resultLabel.Text = "F parry / click attack"
-			resultLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+			resultLabel.Text = "F parry / click attack / I inventory"
+			resultLabel.TextColor3 = GREY
 		end
 	end)
 end

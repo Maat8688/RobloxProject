@@ -1,10 +1,13 @@
 --!strict
--- Every RemoteEvent/RemoteFunction in the game is created here and nowhere
--- else (ARCHITECTURE.md). Anything added must also get a row in that file's
--- remote registry table.
+-- Every RemoteEvent in the game is created here and nowhere else
+-- (ARCHITECTURE.md). Anything added must also get a row in that file's remote
+-- registry table.
 --
 -- The server creates the instances; the client waits for them. Both sides call
 -- Remotes.get(name) and neither needs to know which case it is in.
+--
+-- The list is fixed rather than created on first request, so a mistyped name
+-- fails loudly instead of quietly creating a remote nobody listens to.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -18,14 +21,28 @@ local REMOTE_EVENTS = {
 	"ParryAttempt",
 	"AttackRequest",
 	"EquipWeapon",
-	-- Server -> Client
+
+	-- Server -> Client: combat
 	"EnemyTelegraphStart",
+	"EnemyStaggered",
+	"EnemyHealthChanged",
 	"PlayerHit",
 	"ParryResult",
-	"EnemyStaggered",
 	"AttackResult",
+	"HealBurst",
+
+	-- Server -> Client: equipment and economy
 	"WeaponEquipped",
-	"EnemyHealthChanged",
+	"ChestOpened",
+	"InventoryUpdated",
+	"CurrencyUpdated",
+	"UpgradeResult",
+
+	-- Server -> Client: PvP
+	"PvPStatusChanged",
+	"PvPTelegraphStart",
+	"PvPParryResult",
+	"PvPHealthChanged",
 }
 
 local folder: Folder? = nil
@@ -71,7 +88,17 @@ function Remotes.init()
 end
 
 function Remotes.get(name: string): RemoteEvent
-	local remote = resolveFolder():WaitForChild(name, 10)
+	local resolved = resolveFolder()
+
+	-- The server built every remote up front, so anything missing there is a
+	-- name that was never registered: fail immediately rather than waiting.
+	if RunService:IsServer() then
+		local remote = resolved:FindFirstChild(name)
+		assert(remote, `Remote "{name}" is not registered — add it to REMOTE_EVENTS`)
+		return remote :: RemoteEvent
+	end
+
+	local remote = resolved:WaitForChild(name, 10)
 	assert(remote, `Remote "{name}" was never created — add it to REMOTE_EVENTS`)
 	return remote :: RemoteEvent
 end

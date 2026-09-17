@@ -11,6 +11,7 @@
 -- player most needs to read.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
@@ -30,9 +31,13 @@ local DEAD_COLOR = Color3.fromRGB(60, 60, 60)
 -- base rather than to a single shared red.
 local BASE_COLORS: { [string]: Color3 } = {
 	TrainingDummy = Color3.fromRGB(150, 60, 60),
+	SkeletonWarrior = Color3.fromRGB(200, 195, 170),
 	Shambler = Color3.fromRGB(120, 90, 50),
 	Spitter = Color3.fromRGB(80, 130, 70),
 }
+
+-- Server-side EnemyAI tags every enemy model with this.
+local ENEMY_TAG = "Enemy"
 
 local DEFAULT_BASE = Color3.fromRGB(150, 60, 60)
 
@@ -46,10 +51,12 @@ type Telegraph = {
 
 local telegraphs: { [string]: Telegraph } = {}
 
+-- By tag rather than by scanning Workspace: dungeon enemies live inside a
+-- folder, not at the top level.
 local function findEnemyModel(enemyId: string): Model?
-	for _, model in Workspace:GetChildren() do
-		if model:IsA("Model") and model:GetAttribute("EnemyId") == enemyId then
-			return model
+	for _, tagged in CollectionService:GetTagged(ENEMY_TAG) do
+		if tagged:IsA("Model") and tagged:GetAttribute("EnemyId") == enemyId then
+			return tagged
 		end
 	end
 

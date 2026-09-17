@@ -4,12 +4,17 @@
 --
 -- Class is derived from the equipped weapon (DESIGN.md: "Class = equipped
 -- weapon"), so classTag lives here and there is deliberately no ClassDefs
--- module. Switching weapon switches class because there is nowhere else for
--- class to be stored.
+-- module. Keying by weapon rather than by class also leaves room for a class
+-- to have more than one weapon (ARCHITECTURE.md lists "Staff / Mace" for the
+-- Healer) without restructuring.
 --
 -- Everything that differentiates a class is data in this file. Adding a class
--- is adding a row, not writing code — which is why DESIGN.md's open question
--- about a fixed roster doesn't need answering before step 2.
+-- is adding a row, not writing code — there should never be an
+-- `if classTag == "..."` branch anywhere in combat.
+--
+-- Mage isn't here yet: DESIGN.md flags it as the deliberate exception where
+-- magic replaces basic combat, which needs its own combat model rather than
+-- another row.
 
 export type ParryProfile = {
 	-- Tolerances are measured from the moment of impact, not from the start of
@@ -19,23 +24,34 @@ export type ParryProfile = {
 	lateTolerance: number,
 }
 
--- What a successful parry buys you. This is where "skill must count as much as
+-- What a successful parry buys you, on top of the universal stagger punish
+-- bonus in CombatConstants. This is where "skill must count as much as
 -- level/gear" is expressed per class: every class can parry, but each converts
 -- a parry into a different advantage.
 export type ParryPayoff = {
-	-- Scales CombatConstants.STAGGER_DURATION.
+	-- Scales CombatConstants.STAGGER_DURATION — a longer punish window for
+	-- everyone attacking that enemy.
 	staggerMultiplier: number,
-	-- Health restored to the parrying player.
-	selfHeal: number,
+	-- Health restored to the parrying player AND every other player within
+	-- burstHealRadius. Tied to the parry rather than a passive heal-over-time,
+	-- per DESIGN.md's healer pillar.
+	burstHeal: number,
+	burstHealRadius: number,
 	-- Seconds of amplified outgoing damage after a successful parry.
 	riposteDuration: number,
 	riposteMultiplier: number,
 }
 
 export type AttackProfile = {
-	-- Player-side windup before the swing lands. Long enough to be committal,
-	-- so attacking into a telegraph is a real decision.
+	-- Player-side windup before a PvE swing lands. Long enough to be
+	-- committal, so attacking into a telegraph is a real decision.
 	windup: number,
+	-- How long this weapon's swing telegraphs to a duel opponent before it
+	-- resolves. Players have no EnemyDefs entry to read this from, so it lives
+	-- here. Tracks each class's parry identity: the Tank is slowest and easiest
+	-- to punish, the Assassin fastest and hardest to react to.
+	pvpTelegraph: number,
+	-- Base damage before blacksmith upgrades (EconomyDefs.upgradedDamage).
 	damage: number,
 	range: number,
 	arcDegrees: number,
@@ -53,8 +69,8 @@ export type WeaponDef = {
 
 local WeaponDefs: { [string]: WeaponDef } = {
 	-- Widest window in the game (ARCHITECTURE.md: Tank is "wide/forgiving").
-	-- Converts a parry into control rather than damage — the shield-bash
-	-- counter in ARCHITECTURE.md is the long stagger, giving allies a window.
+	-- Converts a parry into control rather than damage: the longer stagger is a
+	-- longer double-damage window for the whole group.
 	SwordAndShield = {
 		displayName = "Sword & Shield",
 		classTag = "Tank",
@@ -64,12 +80,14 @@ local WeaponDefs: { [string]: WeaponDef } = {
 		},
 		payoff = {
 			staggerMultiplier = 1.5,
-			selfHeal = 0,
+			burstHeal = 0,
+			burstHealRadius = 0,
 			riposteDuration = 0,
 			riposteMultiplier = 1,
 		},
 		attack = {
 			windup = 0.45,
+			pvpTelegraph = 0.5,
 			damage = 12,
 			range = 11,
 			arcDegrees = 110,
@@ -90,12 +108,14 @@ local WeaponDefs: { [string]: WeaponDef } = {
 		},
 		payoff = {
 			staggerMultiplier = 0.8,
-			selfHeal = 0,
+			burstHeal = 0,
+			burstHealRadius = 0,
 			riposteDuration = 2.5,
 			riposteMultiplier = 2.5,
 		},
 		attack = {
 			windup = 0.2,
+			pvpTelegraph = 0.3,
 			damage = 6,
 			range = 8,
 			arcDegrees = 70,
@@ -104,9 +124,10 @@ local WeaponDefs: { [string]: WeaponDef } = {
 		},
 	},
 
-	-- Healing is tied to the skill loop rather than a passive HoT (DESIGN.md).
-	-- Self-heal is the solo-testable half of that; the "parry near allies
-	-- triggers burst heal" half needs allies and lands at build-order step 8.
+	-- The parry-triggered burst heal is what makes the Healer near-
+	-- indispensable (DESIGN.md): healing lives in the skill loop, and it reaches
+	-- allies, so a group without a Healer can't undo the chip damage and bleeds
+	-- that dungeons are tuned around.
 	Staff = {
 		displayName = "Staff",
 		classTag = "Healer",
@@ -116,12 +137,14 @@ local WeaponDefs: { [string]: WeaponDef } = {
 		},
 		payoff = {
 			staggerMultiplier = 1.0,
-			selfHeal = 14,
+			burstHeal = 25,
+			burstHealRadius = 20,
 			riposteDuration = 0,
 			riposteMultiplier = 1,
 		},
 		attack = {
 			windup = 0.35,
+			pvpTelegraph = 0.45,
 			damage = 8,
 			range = 12,
 			arcDegrees = 90,

@@ -114,6 +114,39 @@ describe("AttackSelector.chooseAttack", function()
 	end)
 end)
 
+describe("AttackSelector bounds", function()
+	local ROOM: AttackSelector.Bounds = { minX = -17, maxX = 17, minZ = 33, maxZ = 67 }
+
+	it("contains a point inside the room", function()
+		expect(AttackSelector.isWithinBounds(ROOM, 0, 50)).toBe(true)
+	end)
+
+	it("treats the leash edge as inside", function()
+		expect(AttackSelector.isWithinBounds(ROOM, 17, 67)).toBe(true)
+		expect(AttackSelector.isWithinBounds(ROOM, -17, 33)).toBe(true)
+	end)
+
+	-- The case the leash exists for: a player in the next room over.
+	it("excludes a point in the neighbouring room", function()
+		expect(AttackSelector.isWithinBounds(ROOM, 0, 100)).toBe(false)
+		expect(AttackSelector.isWithinBounds(ROOM, 0, 0)).toBe(false)
+	end)
+
+	it("leaves a point inside the room untouched when clamping", function()
+		local x, z = AttackSelector.clampToBounds(ROOM, 4, 52)
+		expect(x).toBe(4)
+		expect(z).toBe(52)
+	end)
+
+	-- Enemies move by CFrame, which ignores walls; the clamp is what stops them
+	-- walking through one.
+	it("clamps a step that would leave the room back to its edge", function()
+		local x, z = AttackSelector.clampToBounds(ROOM, 40, 20)
+		expect(x).toBe(17)
+		expect(z).toBe(33)
+	end)
+end)
+
 describe("EnemyDefs invariants", function()
 	-- Guards the design rather than the code: an enemy whose attacks leave a
 	-- gap in its own band will stand there doing nothing, which reads as a bug
@@ -146,5 +179,69 @@ describe("EnemyDefs invariants", function()
 				expect(attack.telegraphDuration > 0).toBe(true)
 			end
 		end
+	end)
+
+	it("keeps every bleed well-formed", function()
+		for _, def in EnemyDefs do
+			for _, attack in def.attacks do
+				local dot = attack.dot
+				if dot then
+					expect(dot.tickDamage > 0).toBe(true)
+					expect(dot.tickInterval > 0).toBe(true)
+					expect(dot.ticks >= 1).toBe(true)
+				end
+			end
+		end
+	end)
+
+	-- Rooms are 40 studs across and enemies are leashed inside them, so an
+	-- enemy that wants to stand further away than the room allows would pin
+	-- itself to a wall and never reach its preferred spacing.
+	it("keeps every preferred range inside a single room", function()
+		local ROOM_DIAGONAL_HALF = 40 / 2 * math.sqrt(2)
+		for enemyId, def in EnemyDefs do
+			expect({ enemyId, def.preferredRange <= ROOM_DIAGONAL_HALF }).toEqual({ enemyId, true })
+		end
+	end)
+end)
+
+describe("Enemy economy invariants", function()
+	local LootTables = require(Shared.LootTables)
+
+	-- Any enemy type can end up guarding a chest, so a missing loot row would
+	-- fail the moment a player tried to open one.
+	it("gives every enemy type a loot row", function()
+		for enemyId in EnemyDefs do
+			expect({ enemyId, LootTables[enemyId] ~= nil }).toEqual({ enemyId, true })
+		end
+	end)
+
+	it("pays every enemy type some coins", function()
+		for enemyId, def in EnemyDefs do
+			expect({ enemyId, def.coinReward > 0 }).toEqual({ enemyId, true })
+		end
+	end)
+
+	-- DESIGN.md: crystals only come from tougher enemies, which is what keeps
+	-- trash-mob grinding away from the top blacksmith tiers.
+	it("keeps crystals away from the weakest enemy", function()
+		local weakestId, weakestHealth = nil, math.huge
+		for enemyId, def in EnemyDefs do
+			if def.maxHealth < weakestHealth then
+				weakestId, weakestHealth = enemyId, def.maxHealth
+			end
+		end
+
+		expect(EnemyDefs[weakestId :: string].crystalReward).toBe(0)
+	end)
+
+	it("has at least one crystal source, or the top tiers are unreachable", function()
+		local anyCrystals = false
+		for _, def in EnemyDefs do
+			if def.crystalReward > 0 then
+				anyCrystals = true
+			end
+		end
+		expect(anyCrystals).toBe(true)
 	end)
 end)

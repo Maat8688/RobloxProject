@@ -1,69 +1,78 @@
--- Per-player combat state for one side of a duel: mirrors Combat/Enemy.luau's
--- own Idle -> Telegraph -> (Staggered | Recover) state machine, but the
--- telegraph is started by that player's own AttackAttempt (via
--- PvPCombatServer) instead of an autonomous loop, and the opposing player is
--- the one who tries to parry it — exactly the same attacker/defender split
--- Enemy.luau already has with a real player, just with a Duelist standing in
--- for "the enemy" on both sides at once (build order step 9).
+--!strict
+-- One side of a duel: a player's duel state machine
+-- (idle -> telegraph -> staggered | recover -> idle) and their virtual health.
 --
--- Health is a virtual pool, not the character's real Humanoid: a duel never
--- actually damages or kills the player, so there's no respawn/ragdoll flow
--- to fight — see DESIGN.md's decision log for why this was chosen over
--- letting real Humanoid damage apply.
+-- A duel swing plays the role an enemy attack plays in PvE: the swinging
+-- player telegraphs, and the opponent is the one who tries to parry it. The
+-- same impact-anchored timeline is used, so ParryMath judges a duel parry
+-- exactly the way it judges a PvE one.
+--
+-- Health is a virtual pool, not the character's Humanoid: a duel never
+-- actually damages or kills the player, so there is no respawn or ragdoll flow
+-- to fight (DESIGN.md).
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local CombatConstants = require(Shared:WaitForChild("CombatConstants"))
+local CombatConstants = require(ReplicatedStorage.Shared.CombatConstants)
 
 local Duelist = {}
-Duelist.__index = Duelist
 
-function Duelist.new(player)
-	return setmetatable({
+export type DuelState = "idle" | "telegraph" | "staggered" | "recover"
+
+export type Swing = {
+	weaponId: string,
+	impactTime: number,
+	-- Set the moment the opponent's parry validates. The swing still resolves
+	-- on schedule, but deals nothing.
+	parried: boolean,
+}
+
+export type Duelist = {
+	player: Player,
+	state: DuelState,
+	health: number,
+	swing: Swing?,
+}
+
+function Duelist.new(player: Player): Duelist
+	return {
 		player = player,
-		state = "Idle",
+		state = "idle",
 		health = CombatConstants.PVP_STARTING_HEALTH,
-		pendingWeaponDef = nil,
-		telegraphResolveTime = nil,
-		parriedThisAttack = false,
-	}, Duelist)
+		swing = nil,
+	}
 end
 
--- Called when this duelist swings — `weaponDef` is the attacker's own
--- equipped weapon, read at swing time (mirrors Enemy:_beginTelegraph).
-function Duelist:BeginTelegraph(weaponDef)
-	self.state = "Telegraph"
-	self.pendingWeaponDef = weaponDef
-	self.parriedThisAttack = false
-	self.telegraphResolveTime = os.clock() + weaponDef.pvpTelegraphDuration
+-- The weapon is captured at swing time, so a weapon swap mid-telegraph can't
+-- change what lands.
+function Duelist.beginSwing(duelist: Duelist, weaponId: string, impactTime: number): Swing
+	local swing: Swing = {
+		weaponId = weaponId,
+		impactTime = impactTime,
+		parried = false,
+	}
+
+	duelist.state = "telegraph"
+	duelist.swing = swing
+	return swing
 end
 
--- Called by the opposing player's ParryAttempt. `defenderPlayer` supplies the
--- ping used to compensate the timing check, exactly like Enemy:TryParry —
--- the defender's clock, not the attacker's, is what's out of sync with the
--- server here.
-function Duelist:TryParry(defenderPlayer, parryWindow)
-	if self.state ~= "Telegraph" or self.telegraphResolveTime == nil then
-		return false
-	end
+-- Moves to `state`, then back to idle after `duration` — unless something else
+-- has changed the state in the meantime, in which case that wins.
+function Duelist.holdState(duelist: Duelist, state: DuelState, duration: number)
+	duelist.state = state
 
-	local halfPing = defenderPlayer:GetNetworkPing() / 2
-	local perceivedTime = os.clock() - halfPing
-	local delta = math.abs(perceivedTime - self.telegraphResolveTime)
-
-	if delta <= parryWindow then
-		self.parriedThisAttack = true
-		return true
-	end
-
-	return false
+	task.delay(duration, function()
+		if duelist.state == state then
+			duelist.state = "idle"
+		end
+	end)
 end
 
--- Returns true if this damage brought the duelist to 0 (duel over).
-function Duelist:ApplyDamage(amount)
-	self.health = math.max(0, self.health - amount)
-	return self.health <= 0
+-- Returns true if this damage ended the duel.
+function Duelist.applyDamage(duelist: Duelist, amount: number): boolean
+	duelist.health = math.max(0, duelist.health - amount)
+	return duelist.health <= 0
 end
 
 return Duelist

@@ -39,10 +39,6 @@ describe("Loadout class derivation", function()
 		expect(Loadout.classOf("Staff")).toBe("Healer")
 	end)
 
-	it("has a valid default weapon", function()
-		expect(WeaponDefs[Loadout.DEFAULT_WEAPON]).never.toBeNil()
-	end)
-
 	it("lists every defined weapon in stable order", function()
 		local ids = Loadout.allWeaponIds()
 		local count = 0
@@ -67,6 +63,7 @@ describe("WeaponDefs invariants", function()
 			expect(def.parry.lateTolerance > 0).toBe(true)
 			expect(def.attack.damage > 0).toBe(true)
 			expect(def.attack.staminaCost > 0).toBe(true)
+			expect(def.attack.pvpTelegraph > 0).toBe(true)
 			expect(typeof(weaponId)).toBe("string")
 		end
 	end)
@@ -94,9 +91,31 @@ describe("WeaponDefs invariants", function()
 		for _, def in WeaponDefs do
 			local payoff = def.payoff
 			local hasPayoff = payoff.staggerMultiplier > 1
-				or payoff.selfHeal > 0
+				or payoff.burstHeal > 0
 				or payoff.riposteDuration > 0
 			expect(hasPayoff).toBe(true)
+		end
+	end)
+
+	-- The Healer pillar: healing reaches allies, so a burst heal with no
+	-- radius would quietly turn back into a self-heal.
+	it("gives every burst heal a radius that reaches allies", function()
+		for _, def in WeaponDefs do
+			if def.payoff.burstHeal > 0 then
+				expect(def.payoff.burstHealRadius > 0).toBe(true)
+			end
+		end
+	end)
+
+	-- Riposte and the stagger bonus take the larger rather than stacking, so a
+	-- riposte multiplier at or below the stagger bonus would add nothing
+	-- against a staggered target and very little anywhere else.
+	it("keeps every riposte above the universal stagger bonus", function()
+		local CombatConstants = require(Shared.CombatConstants)
+		for _, def in WeaponDefs do
+			if def.payoff.riposteDuration > 0 then
+				expect(def.payoff.riposteMultiplier > CombatConstants.STAGGER_DAMAGE_MULTIPLIER).toBe(true)
+			end
 		end
 	end)
 end)

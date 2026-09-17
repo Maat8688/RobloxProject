@@ -2,6 +2,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local CombatConstants = require(Shared.CombatConstants)
 local DamageMath = require(Shared.DamageMath)
 
 local JestGlobals = require(ReplicatedStorage.DevPackages.JestGlobals)
@@ -24,18 +25,48 @@ describe("DamageMath.resolveIncoming", function()
 end)
 
 describe("DamageMath.resolveOutgoing", function()
-	it("passes base damage through with no riposte", function()
-		expect(DamageMath.resolveOutgoing(6, false, 2.5)).toBe(6)
+	local function outgoing(base: number, staggered: boolean, riposte: boolean, multiplier: number): number
+		return DamageMath.resolveOutgoing(base, {
+			targetStaggered = staggered,
+			riposteActive = riposte,
+			riposteMultiplier = multiplier,
+		})
+	end
+
+	it("passes base damage through with no bonus active", function()
+		expect(outgoing(6, false, false, 2.5)).toBe(6)
 	end)
 
 	it("amplifies damage during a riposte window", function()
-		expect(DamageMath.resolveOutgoing(6, true, 2.5)).toBe(15)
+		expect(outgoing(6, false, true, 2.5)).toBe(15)
 	end)
 
 	-- Classes without a riposte payoff carry a multiplier of 1, so an active
 	-- flag must still be a no-op for them.
-	it("is a no-op for a class whose multiplier is 1", function()
-		expect(DamageMath.resolveOutgoing(12, true, 1)).toBe(12)
+	it("is a no-op for a class whose riposte multiplier is 1", function()
+		expect(outgoing(12, false, true, 1)).toBe(12)
+	end)
+
+	-- The universal punish window: any class hitting a staggered target.
+	it("applies the stagger bonus to any class", function()
+		expect(outgoing(12, true, false, 1)).toBe(12 * CombatConstants.STAGGER_DAMAGE_MULTIPLIER)
+	end)
+
+	-- Both bonuses reward the same parry, so they take the larger instead of
+	-- multiplying — otherwise a riposte into a stagger would hit for 5x.
+	it("takes the larger bonus rather than stacking them", function()
+		expect(outgoing(10, true, true, 2.5)).toBe(25)
+		expect(outgoing(10, true, true, 1.5)).toBe(10 * CombatConstants.STAGGER_DAMAGE_MULTIPLIER)
+	end)
+end)
+
+describe("DamageMath.horizontalDistance", function()
+	it("measures on the XZ plane", function()
+		expect(DamageMath.horizontalDistance({ x = 0, z = 0 }, { x = 3, z = 4 })).toBe(5)
+	end)
+
+	it("is zero for the same point", function()
+		expect(DamageMath.horizontalDistance({ x = 7, z = -2 }, { x = 7, z = -2 })).toBe(0)
 	end)
 end)
 

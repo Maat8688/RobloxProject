@@ -1,12 +1,25 @@
 --!strict
--- enemyId -> stats, movement, and attack timelines.
+-- enemyId -> stats, movement, rewards, and attack timelines.
 -- Pure data — no Roblox API.
 --
--- Behaviour is data, not code. An enemy is defined by its attack band
--- (minRange/maxRange), how it wants to position (preferredRange), and how it
+-- Behaviour is data, not code. An enemy is defined by its attack bands
+-- (minRange/maxRange), where it wants to stand (preferredRange), and how it
 -- weights its options — so a kiting ranged enemy and a charging melee one come
 -- out of the same selector with no per-enemy branches. Adding an enemy type
--- should be adding a row here.
+-- should be adding a row here, plus a LootTables entry for its chest.
+--
+-- Dungeon rooms are 40 studs across (RoomTemplates), and enemies are leashed
+-- to their room, so preferredRange and attack bands are sized to fit inside
+-- one.
+
+-- Damage that keeps ticking after a hit lands. The "unavoidable chip damage"
+-- half of DESIGN.md's healer pillar: a mistimed dodge isn't one number a Tank
+-- shrugs off, it's a bleed only sustain fully undoes.
+export type DotDef = {
+	tickDamage: number,
+	tickInterval: number,
+	ticks: number,
+}
 
 export type AttackDef = {
 	-- Seconds from the start of the windup to impact. The parry window is
@@ -17,7 +30,7 @@ export type AttackDef = {
 	parryable: boolean,
 	damage: number,
 	-- Server-side hit-reg volume, checked against the character's server
-	-- position at the moment of impact.
+	-- position at the moment of impact. Also bounds who may parry it.
 	range: number,
 	arcDegrees: number,
 	-- Band in which this attack is a legal choice. An attack whose minRange is
@@ -28,6 +41,8 @@ export type AttackDef = {
 	weight: number,
 	-- Per-attack cooldown, so a heavy hit can't be chained.
 	cooldown: number,
+	-- Applied only when the hit lands unparried.
+	dot: DotDef?,
 }
 
 export type EnemyDef = {
@@ -42,12 +57,17 @@ export type EnemyDef = {
 	moveSpeed: number,
 	-- Beyond this the enemy ignores the player entirely.
 	aggroRange: number,
+	-- Paid by CurrencyService to whoever lands the killing blow. Only tougher
+	-- enemies pay crystals, which is what keeps trash-mob grinding away from
+	-- the top blacksmith tiers (DESIGN.md).
+	coinReward: number,
+	crystalReward: number,
 	attacks: { [string]: AttackDef },
 }
 
 local EnemyDefs: { [string]: EnemyDef } = {
-	-- Stationary tuning target. Deliberately kept as the one enemy that never
-	-- moves, so parry timing can be measured without chasing anything.
+	-- Stationary. The one enemy that never moves, so parry timing can be
+	-- measured without chasing anything.
 	TrainingDummy = {
 		displayName = "Training Dummy",
 		maxHealth = 100,
@@ -55,6 +75,8 @@ local EnemyDefs: { [string]: EnemyDef } = {
 		preferredRange = 0,
 		moveSpeed = 0,
 		aggroRange = 60,
+		coinReward = 10,
+		crystalReward = 0,
 		attacks = {
 			Overhead = {
 				telegraphDuration = 1.2,
@@ -82,6 +104,46 @@ local EnemyDefs: { [string]: EnemyDef } = {
 		},
 	},
 
+	-- The tough one, and the only crystal source. A quick parryable Slash, and
+	-- an unparryable GroundSlam whose hit volume (14) is wider than the range
+	-- it's used from (10) — so escaping it means backing well off, and failing
+	-- to leaves a bleed.
+	SkeletonWarrior = {
+		displayName = "Skeleton Warrior",
+		maxHealth = 80,
+		attackInterval = 1.0,
+		preferredRange = 6,
+		moveSpeed = 6,
+		aggroRange = 40,
+		coinReward = 25,
+		crystalReward = 1,
+		attacks = {
+			Slash = {
+				telegraphDuration = 0.5,
+				parryable = true,
+				damage = 12,
+				range = 8,
+				arcDegrees = 110,
+				minRange = 0,
+				maxRange = 8,
+				weight = 3,
+				cooldown = 0,
+			},
+			GroundSlam = {
+				telegraphDuration = 0.9,
+				parryable = false,
+				damage = 25,
+				range = 14,
+				arcDegrees = 360,
+				minRange = 0,
+				maxRange = 10,
+				weight = 1,
+				cooldown = 5,
+				dot = { tickDamage = 5, tickInterval = 1, ticks = 3 },
+			},
+		},
+	},
+
 	-- Aggressive melee. Closes to touching range and pressures with a fast
 	-- parryable swing, punishing players who only ever back away.
 	Shambler = {
@@ -91,6 +153,8 @@ local EnemyDefs: { [string]: EnemyDef } = {
 		preferredRange = 6,
 		moveSpeed = 9,
 		aggroRange = 70,
+		coinReward = 15,
+		crystalReward = 0,
 		attacks = {
 			Claw = {
 				telegraphDuration = 0.8,
@@ -119,24 +183,26 @@ local EnemyDefs: { [string]: EnemyDef } = {
 		},
 	},
 
-	-- Ranged. Its preferredRange sits outside its own melee, so the shared
-	-- movement rule makes it kite without any kiting-specific code.
+	-- Ranged. Its preferredRange sits outside its own point-blank option, so
+	-- the shared movement rule makes it kite without any kiting-specific code.
 	Spitter = {
 		displayName = "Spitter",
 		maxHealth = 45,
 		attackInterval = 1.2,
-		preferredRange = 28,
+		preferredRange = 16,
 		moveSpeed = 7,
 		aggroRange = 80,
+		coinReward = 15,
+		crystalReward = 0,
 		attacks = {
 			Spit = {
 				telegraphDuration = 1.4,
 				parryable = true,
 				damage = 12,
-				range = 34,
+				range = 28,
 				arcDegrees = 25,
-				minRange = 12,
-				maxRange = 34,
+				minRange = 8,
+				maxRange = 26,
 				weight = 4,
 				cooldown = 1.5,
 			},
@@ -149,7 +215,7 @@ local EnemyDefs: { [string]: EnemyDef } = {
 				range = 12,
 				arcDegrees = 360,
 				minRange = 0,
-				maxRange = 12,
+				maxRange = 8,
 				weight = 5,
 				cooldown = 5,
 			},

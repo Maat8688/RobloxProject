@@ -3,14 +3,16 @@
 -- positional checks take plain vectors rather than Roblox instances so they
 -- stay testable outside the engine.
 
+local CombatConstants = require(script.Parent.CombatConstants)
+
 local DamageMath = {}
 
 export type Vec2 = { x: number, z: number }
 
 -- Damage a parried attack still deals. Zero for now: a clean parry fully
--- negates, which makes the vertical slice's feedback unambiguous while the
--- window itself is being tuned. If chip damage on parry is introduced later,
--- log it in DESIGN.md first.
+-- negates, which keeps feedback unambiguous while the windows are being
+-- tuned. If chip damage on parry is introduced later, log it in DESIGN.md
+-- first.
 local PARRIED_DAMAGE_MULTIPLIER = 0
 
 function DamageMath.resolveIncoming(baseDamage: number, wasParried: boolean): number
@@ -21,20 +23,39 @@ function DamageMath.resolveIncoming(baseDamage: number, wasParried: boolean): nu
 	return baseDamage
 end
 
--- Damage the player deals. The riposte window is the Assassin's parry payoff:
--- a tight parry converts into a burst of amplified damage, which is how
--- "skill must count as much as level/gear" is expressed for that class rather
--- than through stat scaling.
-function DamageMath.resolveOutgoing(baseDamage: number, riposteActive: boolean, riposteMultiplier: number): number
-	if riposteActive then
-		return baseDamage * riposteMultiplier
+export type OutgoingContext = {
+	-- The target is in its post-parry stagger: the universal punish window.
+	targetStaggered: boolean,
+	-- The attacker is inside their own riposte window: the Assassin's payoff.
+	riposteActive: boolean,
+	riposteMultiplier: number,
+}
+
+-- Damage a player deals, after upgrades have already been applied to
+-- baseDamage.
+--
+-- The two bonuses take the larger rather than multiplying. Both reward the
+-- same thing — a parry that just landed — so stacking them would double-count
+-- one skill expression: an Assassin riposting into a staggered target would
+-- hit for 5x, dwarfing every other number in the game. With max(), the
+-- riposte's value is that it applies to targets that AREN'T staggered, and
+-- that it outlasts the stagger.
+function DamageMath.resolveOutgoing(baseDamage: number, context: OutgoingContext): number
+	local multiplier = 1
+
+	if context.targetStaggered then
+		multiplier = math.max(multiplier, CombatConstants.STAGGER_DAMAGE_MULTIPLIER)
 	end
 
-	return baseDamage
+	if context.riposteActive then
+		multiplier = math.max(multiplier, context.riposteMultiplier)
+	end
+
+	return baseDamage * multiplier
 end
 
 -- Per-class scaling of the base stagger. The Tank's payoff is control: a
--- longer stagger opening rather than extra damage.
+-- longer stagger is a longer punish window for everyone.
 function DamageMath.staggerDuration(baseDuration: number, staggerMultiplier: number): number
 	return baseDuration * staggerMultiplier
 end
@@ -43,16 +64,16 @@ function DamageMath.applyHealing(currentHealth: number, maxHealth: number, heali
 	return math.clamp(currentHealth + healing, 0, maxHealth)
 end
 
--- Flattened to the XZ plane: the slice's room is flat, and ignoring height
--- avoids an attack whiffing because a player hopped.
-local function horizontalDistance(from: Vec2, to: Vec2): number
+-- Flattened to the XZ plane: rooms are flat, and ignoring height avoids an
+-- attack whiffing because a player hopped.
+function DamageMath.horizontalDistance(from: Vec2, to: Vec2): number
 	local dx = to.x - from.x
 	local dz = to.z - from.z
 	return math.sqrt(dx * dx + dz * dz)
 end
 
--- Signed angle between the attacker's facing and the direction to the target,
--- in degrees, always 0-180.
+-- Angle between the attacker's facing and the direction to the target, in
+-- degrees, always 0-180.
 local function angleToTarget(attackerPos: Vec2, attackerFacing: Vec2, targetPos: Vec2): number
 	local dx = targetPos.x - attackerPos.x
 	local dz = targetPos.z - attackerPos.z
@@ -86,9 +107,10 @@ export type HitTestParams = {
 }
 
 -- Evaluated on the server against server-side positions at the moment of
--- impact. The client is never asked whether it was hit.
+-- impact. The client is never asked whether it was hit. Used for enemy
+-- strikes, player swings, and duel swings alike.
 function DamageMath.isInHitVolume(params: HitTestParams): boolean
-	if horizontalDistance(params.attackerPos, params.targetPos) > params.range then
+	if DamageMath.horizontalDistance(params.attackerPos, params.targetPos) > params.range then
 		return false
 	end
 

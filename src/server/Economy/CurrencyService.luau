@@ -1,31 +1,37 @@
--- The only place currency state lives, mirroring EquipService/InventoryService.
--- In-memory only — resets on rejoin until DataStore persistence lands in build
--- order step 10.
+--!strict
+-- The only place currency state lives, mirroring EquipService and
+-- InventoryService. In-memory only — resets on rejoin until DataStore
+-- persistence lands in build-order step 10.
 --
--- Two currencies, per DESIGN.md: coins drop from every kill, crystals only from
--- enemies whose EnemyDefs entry sets crystalReward. Crystals are keyed by class
--- id (Tank/Assassin/Healer) and you earn the class you were *playing* when the
--- kill landed — so switching weapon doesn't carry your upgrade materials over,
--- which is where respeccing's "real cost" actually comes from.
+-- Two currencies (DESIGN.md): coins drop from every kill, crystals only from
+-- enemies whose EnemyDefs entry sets crystalReward. Crystals are keyed by
+-- class, and you earn the class you were *playing* when the kill landed — so
+-- switching weapon doesn't carry your upgrade materials across. That is where
+-- respeccing's real cost comes from.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local EnemyDefs = require(Shared:WaitForChild("EnemyDefs"))
-local Remotes = require(Shared:WaitForChild("Remotes"))
+local Shared = ReplicatedStorage.Shared
+local Loadout = require(Shared.Loadout)
+local Remotes = require(Shared.Remotes)
 
+local EnemyAI = require(script.Parent.Parent.Combat.EnemyAI)
 local EquipService = require(script.Parent.Parent.EquipService)
-
-local currencyUpdatedRemote = Remotes.Get(Remotes.Names.CurrencyUpdated)
 
 local CurrencyService = {}
 
-local balances = {}
+export type Balance = {
+	coins: number,
+	-- classTag -> count
+	crystals: { [string]: number },
+}
 
-local function getBalance(player)
+local balances: { [Player]: Balance } = {}
+
+local function getBalance(player: Player): Balance
 	local balance = balances[player]
-	if balance == nil then
+	if not balance then
 		balance = { coins = 0, crystals = {} }
 		balances[player] = balance
 	end
@@ -33,20 +39,22 @@ local function getBalance(player)
 	return balance
 end
 
-local function publish(player, balance)
-	currencyUpdatedRemote:FireClient(player, balance.coins, balance.crystals)
+local function publish(player: Player, balance: Balance)
+	Remotes.get("CurrencyUpdated"):FireClient(player, {
+		coins = balance.coins,
+		crystals = balance.crystals,
+	})
 end
 
-function CurrencyService.GetBalance(player)
+function CurrencyService.getBalance(player: Player): Balance
 	return getBalance(player)
 end
 
 -- Spends only if the player can afford the whole cost — never partially.
--- `crystalType` is a class id; `crystals` of 0 means coins-only (the lower
--- blacksmith tiers), in which case crystalType is irrelevant.
-function CurrencyService.TrySpend(player, coins, crystalType, crystals)
+-- `crystalClass` is irrelevant when `crystals` is 0 (the coin-only tiers).
+function CurrencyService.trySpend(player: Player, coins: number, crystalClass: string, crystals: number): boolean
 	local balance = getBalance(player)
-	local heldCrystals = balance.crystals[crystalType] or 0
+	local heldCrystals = balance.crystals[crystalClass] or 0
 
 	if balance.coins < coins or heldCrystals < crystals then
 		return false
@@ -54,20 +62,20 @@ function CurrencyService.TrySpend(player, coins, crystalType, crystals)
 
 	balance.coins -= coins
 	if crystals > 0 then
-		balance.crystals[crystalType] = heldCrystals - crystals
+		balance.crystals[crystalClass] = heldCrystals - crystals
 	end
 
 	publish(player, balance)
 	return true
 end
 
--- Pays out that enemy's EnemyDefs reward to whoever lands the killing blow.
--- Registered per enemy by DungeonGenerator, alongside its chest.
-function CurrencyService.TrackEnemy(enemy, enemyType)
-	local def = EnemyDefs[enemyType]
+-- Pays out an enemy's EnemyDefs reward to whoever lands the killing blow, every
+-- time it dies. Registered per enemy by DungeonGenerator, alongside its chest.
+function CurrencyService.trackEnemy(enemy: EnemyAI.Enemy)
+	local def = enemy.def
 
-	enemy:OnDeath(function(killer)
-		if killer == nil then
+	EnemyAI.onDeath(enemy, function(killer)
+		if not killer or not killer.Parent then
 			return
 		end
 
@@ -75,10 +83,10 @@ function CurrencyService.TrackEnemy(enemy, enemyType)
 		balance.coins += def.coinReward
 
 		if def.crystalReward > 0 then
-			local weaponDef = EquipService.GetWeapon(killer)
-			if weaponDef ~= nil then
-				local crystalType = weaponDef.class
-				balance.crystals[crystalType] = (balance.crystals[crystalType] or 0) + def.crystalReward
+			local weaponId = EquipService.getWeaponId(killer)
+			if weaponId then
+				local class = Loadout.classOf(weaponId)
+				balance.crystals[class] = (balance.crystals[class] or 0) + def.crystalReward
 			end
 		end
 

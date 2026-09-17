@@ -11,9 +11,9 @@ local WeaponDefs = require(script.Parent.WeaponDefs)
 
 local Loadout = {}
 
--- What a player starts with before any equip system exists (build-order
--- step 6 replaces this with saved loadouts).
-Loadout.DEFAULT_WEAPON = "SwordAndShield"
+-- There is deliberately no default weapon. Players start unequipped in the safe
+-- start room and pick one from the weapon stands, which is the first step of
+-- DESIGN.md's core loop ("choose a weapon at start").
 
 export type EquipResult = {
 	ok: boolean,
@@ -22,8 +22,9 @@ export type EquipResult = {
 	reason: string?,
 }
 
--- Every equip request originates on the client, so the id is untrusted input
--- and is checked against the definition table rather than assumed valid.
+-- Equip requests can originate on the client (the Studio-only debug hotkeys),
+-- so the id is treated as untrusted input and checked against the definition
+-- table rather than assumed valid.
 function Loadout.resolve(weaponId: unknown): EquipResult
 	if type(weaponId) ~= "string" then
 		return { ok = false, reason = "invalid_weapon" }

@@ -23,6 +23,28 @@ export type MovementIntent = "approach" | "retreat" | "hold" | "idle"
 -- and the caller owns all enemy state.
 export type CooldownMap = { [string]: number }
 
+-- An enemy's leash: the XZ rectangle of the room it belongs to, already inset
+-- from the walls.
+--
+-- Enemies move by stepping an anchored part rather than through physics, so
+-- nothing else stops them walking through a wall. The leash is what keeps each
+-- one in its own room, and what stops one aggroing on a player in the next
+-- room over.
+export type Bounds = {
+	minX: number,
+	maxX: number,
+	minZ: number,
+	maxZ: number,
+}
+
+function AttackSelector.isWithinBounds(bounds: Bounds, x: number, z: number): boolean
+	return x >= bounds.minX and x <= bounds.maxX and z >= bounds.minZ and z <= bounds.maxZ
+end
+
+function AttackSelector.clampToBounds(bounds: Bounds, x: number, z: number): (number, number)
+	return math.clamp(x, bounds.minX, bounds.maxX), math.clamp(z, bounds.minZ, bounds.maxZ)
+end
+
 function AttackSelector.movementIntent(def: EnemyDefs.EnemyDef, distance: number): MovementIntent
 	if distance > def.aggroRange then
 		return "idle"

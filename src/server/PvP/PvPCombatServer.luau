@@ -1,116 +1,244 @@
--- Wires the same AttackAttempt/ParryAttempt remotes Combat/CombatServer.luau
--- uses for PvE to duel resolution instead, for whichever two players
--- ArenaService currently has dueling — reusing WeaponDefs/CombatConstants
--- rather than a parallel PvP-only rule set, per DESIGN.md's "PvP exists but
--- reuses the same combat system" decision. A player who isn't in a duel is
--- simply ignored here (CombatServer.luau's own listener handles them
--- against dungeon enemies instead — the two listeners never overlap since a
--- player can't be in the arena and the dungeon at once).
+--!strict
+-- Resolves swings and parries inside the active duel.
 --
--- Damage bonus on a Staggered target and the parry-timing check themselves
--- are identical in spirit to Enemy.luau; see Duelist.luau for why each
--- player's own state machine stands in for what Enemy.luau does for a single
--- enemy.
+-- PvP reuses the PvE combat system rather than a parallel rule set (DESIGN.md),
+-- so a duel runs on the same pieces: ParryMath's timestamp authority and
+-- impact-anchored window, the shared stamina pool and whiff lockout, the same
+-- late-parry grace, and DamageMath's range/arc hit test. A player's swing
+-- stands in for an enemy attack, and their opponent is the one parrying it.
+--
+-- This module doesn't listen on any remote itself. CombatServer owns the
+-- ParryAttempt and AttackRequest listeners and routes a dueling player here,
+-- so a single press can never be handled by both PvE and PvP at once.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local CombatConstants = require(Shared:WaitForChild("CombatConstants"))
-local Remotes = require(Shared:WaitForChild("Remotes"))
+local Shared = ReplicatedStorage.Shared
+local CombatConstants = require(Shared.CombatConstants)
+local DamageMath = require(Shared.DamageMath)
+local Loadout = require(Shared.Loadout)
+local ParryMath = require(Shared.ParryMath)
+local Remotes = require(Shared.Remotes)
 
+local Characters = require(script.Parent.Parent.Combat.Characters)
+local PlayerCombatState = require(script.Parent.Parent.Combat.PlayerCombatState)
 local EquipService = require(script.Parent.Parent.EquipService)
-
-local attackAttemptRemote = Remotes.Get(Remotes.Names.AttackAttempt)
-local parryAttemptRemote = Remotes.Get(Remotes.Names.ParryAttempt)
-local pvpTelegraphRemote = Remotes.Get(Remotes.Names.PvPTelegraphStart)
-local pvpParryResultRemote = Remotes.Get(Remotes.Names.PvPParryResult)
-local playerHitRemote = Remotes.Get(Remotes.Names.PlayerHit)
+local ArenaService = require(script.Parent.ArenaService)
+local Duelist = require(script.Parent.Duelist)
 
 local PvPCombatServer = {}
 
-function PvPCombatServer.Start(ArenaService)
-	local function resolveAttack(attacker, attackerDuelist)
-		-- Re-fetch rather than trusting the opponent captured at swing time:
-		-- the duel may have already ended (opponent left, or this duelist
-		-- already lost) while the telegraph was in flight.
-		local opponentDuelist, opponent = ArenaService.GetOpponent(attacker)
-		if opponentDuelist == nil or attackerDuelist.state ~= "Telegraph" then
-			return
-		end
+function PvPCombatServer.isDueling(player: Player): boolean
+	return ArenaService.getDuelist(player) ~= nil
+end
 
-		if attackerDuelist.parriedThisAttack then
-			attackerDuelist.state = "Staggered"
-			pvpParryResultRemote:FireClient(opponent, true, "Parried!")
-			pvpParryResultRemote:FireClient(attacker, false, "Your attack was parried!")
+local function attackResult(player: Player, payload: { [string]: any })
+	Remotes.get("AttackResult"):FireClient(player, payload)
+end
 
-			task.delay(CombatConstants.STAGGER_DURATION, function()
-				if attackerDuelist.state == "Staggered" then
-					attackerDuelist.state = "Idle"
-				end
-			end)
+local function resolveSwing(attacker: Player, attackerDuelist: Duelist.Duelist, swing: Duelist.Swing)
+	-- A newer swing, or a parry that already staggered this one, owns the
+	-- duelist's state now.
+	if attackerDuelist.swing ~= swing then
+		return
+	end
+	attackerDuelist.swing = nil
 
-			return
-		end
-
-		local damage = attackerDuelist.pendingWeaponDef.baseDamage
-		if opponentDuelist.state == "Staggered" then
-			damage *= CombatConstants.STAGGER_DAMAGE_MULTIPLIER
-		end
-
-		local defeated = opponentDuelist:ApplyDamage(damage)
-		playerHitRemote:FireClient(opponent, damage, attacker.Name)
-		ArenaService.PublishHealth()
-
-		if defeated then
-			ArenaService.EndDuel(opponent)
-			return
-		end
-
-		attackerDuelist.state = "Recover"
-		task.delay(CombatConstants.RECOVER_DURATION, function()
-			if attackerDuelist.state == "Recover" then
-				attackerDuelist.state = "Idle"
-			end
-		end)
+	if swing.parried then
+		return
 	end
 
-	attackAttemptRemote.OnServerEvent:Connect(function(player)
-		local attackerDuelist = ArenaService.GetDuelist(player)
-		if attackerDuelist == nil or attackerDuelist.state ~= "Idle" then
-			return
-		end
+	-- Re-fetched rather than captured at swing time: the duel may have ended
+	-- while the telegraph was in flight.
+	local opponentDuelist, opponent = ArenaService.getOpponent(attacker)
+	if not opponentDuelist or not opponent then
+		return
+	end
 
-		local _, opponent = ArenaService.GetOpponent(player)
-		if opponent == nil then
-			return
-		end
+	local weapon = Loadout.getDef(swing.weaponId)
+	local attackerRoot = Characters.getRoot(attacker)
+	local opponentRoot = Characters.getRoot(opponent)
 
-		local weaponDef = EquipService.GetWeapon(player)
-		if weaponDef == nil then
-			return
-		end
+	local inVolume = attackerRoot ~= nil
+		and opponentRoot ~= nil
+		and DamageMath.isInHitVolume({
+			attackerPos = Characters.flat(attackerRoot.Position),
+			attackerFacing = Characters.flat(attackerRoot.CFrame.LookVector),
+			targetPos = Characters.flat(opponentRoot.Position),
+			range = weapon.attack.range,
+			arcDegrees = weapon.attack.arcDegrees,
+		})
 
-		attackerDuelist:BeginTelegraph(weaponDef)
-		pvpTelegraphRemote:FireClient(opponent, player.Name, weaponDef.pvpTelegraphDuration)
+	Duelist.holdState(attackerDuelist, "recover", weapon.attack.cooldown)
 
-		task.delay(weaponDef.pvpTelegraphDuration, function()
-			resolveAttack(player, attackerDuelist)
-		end)
+	if not inVolume then
+		attackResult(attacker, { hit = false, reason = "missed", damage = 0, riposte = false })
+		return
+	end
+
+	local now = Workspace:GetServerTimeNow()
+	local attackerState = PlayerCombatState.peek(attacker)
+	local riposteActive = now < attackerState.riposteUntil
+
+	local damage = DamageMath.resolveOutgoing(EquipService.getDamage(attacker, swing.weaponId), {
+		targetStaggered = opponentDuelist.state == "staggered",
+		riposteActive = riposteActive,
+		riposteMultiplier = weapon.payoff.riposteMultiplier,
+	})
+
+	local defeated = Duelist.applyDamage(opponentDuelist, damage)
+
+	Remotes.get("PlayerHit"):FireClient(opponent, {
+		amount = damage,
+		sourceId = attacker.Name,
+		attackId = swing.weaponId,
+	})
+	attackResult(attacker, { hit = true, reason = "hit", damage = damage, riposte = riposteActive })
+	ArenaService.publishHealth()
+
+	if defeated then
+		ArenaService.endDuel(opponent)
+	end
+end
+
+function PvPCombatServer.handleAttack(attacker: Player)
+	local attackerDuelist = ArenaService.getDuelist(attacker)
+	local _, opponent = ArenaService.getOpponent(attacker)
+	if not attackerDuelist or not opponent then
+		return
+	end
+
+	local weaponId = EquipService.getWeaponId(attacker)
+	if not weaponId then
+		attackResult(attacker, { hit = false, reason = "unequipped", damage = 0, riposte = false })
+		return
+	end
+
+	-- The duel state machine is the cooldown: a swing can only start from idle.
+	if attackerDuelist.state ~= "idle" then
+		attackResult(attacker, { hit = false, reason = "cooldown", damage = 0, riposte = false })
+		return
+	end
+
+	local now = Workspace:GetServerTimeNow()
+	local state = PlayerCombatState.sync(attacker, now)
+	local attack = Loadout.getDef(weaponId).attack
+
+	if state.stamina < attack.staminaCost then
+		attackResult(attacker, { hit = false, reason = "exhausted", damage = 0, riposte = false })
+		return
+	end
+	state.stamina -= attack.staminaCost
+
+	local swing = Duelist.beginSwing(attackerDuelist, weaponId, now + attack.pvpTelegraph)
+
+	Remotes.get("PvPTelegraphStart"):FireClient(opponent, {
+		attackerName = attacker.Name,
+		duration = attack.pvpTelegraph,
+		impactTime = swing.impactTime,
+	})
+
+	-- Held open past impact so a late-half parry can still arrive, exactly as
+	-- for enemy attacks.
+	task.delay(attack.pvpTelegraph + CombatConstants.STRIKE_RESOLUTION_GRACE, function()
+		resolveSwing(attacker, attackerDuelist, swing)
 	end)
+end
 
-	parryAttemptRemote.OnServerEvent:Connect(function(player)
-		local opponentDuelist = ArenaService.GetOpponent(player)
-		if opponentDuelist == nil or opponentDuelist.state ~= "Telegraph" then
-			return
-		end
+function PvPCombatServer.handleParry(defender: Player, attemptTime: number, now: number)
+	local opponentDuelist, attacker = ArenaService.getOpponent(defender)
+	if not opponentDuelist or not attacker then
+		return
+	end
 
-		local weaponDef = EquipService.GetWeapon(player)
-		if weaponDef == nil then
-			return
-		end
+	local parryResult = Remotes.get("ParryResult")
+	local state = PlayerCombatState.sync(defender, now)
 
-		opponentDuelist:TryParry(player, weaponDef.parryWindow)
-	end)
+	local function respond(verdict: string, success: boolean, deltaMs: number)
+		parryResult:FireClient(defender, {
+			verdict = verdict,
+			success = success,
+			deltaMs = deltaMs,
+			stamina = state.stamina,
+			riposteUntil = state.riposteUntil,
+			enemyId = if attacker then attacker.Name else nil,
+		})
+	end
+
+	local weaponId = EquipService.getWeaponId(defender)
+	if not weaponId then
+		respond("unequipped", false, 0)
+		return
+	end
+
+	local readiness = ParryMath.checkReadiness(state.stamina, state.lockoutUntil, now)
+	if not readiness.allowed then
+		respond(readiness.reason :: string, false, 0)
+		return
+	end
+
+	-- Spent before evaluating, so a whiff costs the same as a success — the
+	-- cost that stops parry spam from making a duelist unbeatable.
+	state.stamina -= CombatConstants.PARRY_STAMINA_COST
+
+	local swing = opponentDuelist.swing
+	local defenderRoot = Characters.getRoot(defender)
+	local attackerRoot = Characters.getRoot(attacker)
+
+	local inReach = false
+	if swing and defenderRoot and attackerRoot then
+		local distance = DamageMath.horizontalDistance(
+			Characters.flat(defenderRoot.Position),
+			Characters.flat(attackerRoot.Position)
+		)
+		inReach = distance <= Loadout.getDef(swing.weaponId).attack.range + CombatConstants.PARRY_RANGE_MARGIN
+	end
+
+	if not swing or swing.parried or opponentDuelist.state ~= "telegraph" or not inReach then
+		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
+		respond("no_attack", false, 0)
+		return
+	end
+
+	local defenderWeapon = Loadout.getDef(weaponId)
+	local evaluation = ParryMath.evaluate({
+		attemptTime = attemptTime,
+		serverNow = now,
+		halfPing = Characters.halfPing(defender),
+		impactTime = swing.impactTime,
+		parryProfile = defenderWeapon.parry,
+		-- Player swings are always parryable. An unparryable player move would
+		-- need its own design pass, not a flag flipped here.
+		attackParryable = true,
+	})
+
+	if not evaluation.success then
+		state.lockoutUntil = now + CombatConstants.WHIFF_LOCKOUT
+		respond(evaluation.verdict, false, evaluation.deltaMs)
+		return
+	end
+
+	swing.parried = true
+
+	-- The defender's class decides how long the attacker is opened up, the
+	-- same way it does against an enemy.
+	local staggerFor = DamageMath.staggerDuration(CombatConstants.STAGGER_DURATION, defenderWeapon.payoff.staggerMultiplier)
+	Duelist.holdState(opponentDuelist, "staggered", staggerFor)
+
+	if defenderWeapon.payoff.riposteDuration > 0 then
+		state.riposteUntil = now + defenderWeapon.payoff.riposteDuration
+	end
+
+	-- No burst heal in a duel: duel health is a virtual pool, so healing the
+	-- real Humanoid would do nothing, and healing the pool would be a PvP-only
+	-- rule this module exists to avoid.
+
+	respond(evaluation.verdict, true, evaluation.deltaMs)
+
+	local pvpParryResult = Remotes.get("PvPParryResult")
+	pvpParryResult:FireClient(defender, { success = true, message = "Parried!" })
+	pvpParryResult:FireClient(attacker, { success = false, message = "Your attack was parried!" })
 end
 
 return PvPCombatServer
