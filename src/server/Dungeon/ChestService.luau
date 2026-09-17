@@ -1,66 +1,194 @@
 --!strict
--- One chest per combat room, barrier-locked to that room's enemy (its guard).
+-- Chests: locked behind a barrier until every guard in their room is dead,
+-- then opened once, by whoever gets there first.
 --
--- Unlocks permanently the first time the guard dies, even though the guard
--- keeps respawning for repeat practice — the unlock is a one-time latch, not
--- tied to the guard's current state. The first player to open it takes the
--- loot.
+-- A chest with no guards is open from the start. Guards in a dungeon don't
+-- respawn, so "every guard dead" is also a one-time latch: once unlocked, a
+-- chest stays unlocked.
+--
+-- What's inside is decided when the chest is made, not when it's opened, so a
+-- missing loot row fails at dungeon generation instead of in a player's hands.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage.Shared
 local LootTables = require(Shared.LootTables)
 local Remotes = require(Shared.Remotes)
 
 local EnemyAI = require(script.Parent.Parent.Combat.EnemyAI)
+local CurrencyService = require(script.Parent.Parent.Economy.CurrencyService)
 local InventoryService = require(script.Parent.Parent.InventoryService)
 
-local LOCKED_COLOR = Color3.fromRGB(99, 95, 98)
-local UNLOCKED_COLOR = Color3.fromRGB(255, 255, 0)
+local WOOD_COLOR = Color3.fromRGB(110, 70, 40)
+local IRON_COLOR = Color3.fromRGB(50, 48, 52)
+local GOLD_COLOR = Color3.fromRGB(230, 180, 60)
+
+local BODY_SIZE = Vector3.new(3.2, 1.8, 2.2)
+local LID_SIZE = Vector3.new(3.3, 0.7, 2.3)
+
+-- Positive about X tips the lid's front edge up and back over the hinge.
+local LID_OPEN_ANGLE = math.rad(105)
 
 local ChestService = {}
 
-function ChestService.createChest(cframe: CFrame, guard: EnemyAI.Enemy, parent: Instance): Part
-	local chestId = `{guard.id}_Chest`
+export type ChestSpec = {
+	-- Where the chest stands on the floor. Its front (the lock) faces this
+	-- CFrame's look direction.
+	floorCFrame: CFrame,
+	-- Every one must be dead before the chest opens. Empty means unlocked,
+	-- unless `startsLocked`.
+	guards: { EnemyAI.Enemy },
+	-- Locked until the unlock function createChest returns is called, for a
+	-- room whose guards don't exist yet (an ambush).
+	startsLocked: boolean?,
+	loot: LootTables.LootDescriptor,
+	-- Extra coins for whoever opens it.
+	coins: number,
+	name: string,
+	parent: Instance,
+}
 
-	-- Resolved now rather than when the chest opens, so a guard with no loot
-	-- row fails at dungeon generation instead of in a player's hands.
-	local loot = LootTables[guard.defId]
-	assert(loot, `No LootTables entry for "{guard.defId}"`)
+local function decor(parent: Instance, name: string, size: Vector3, cframe: CFrame, color: Color3, material: Enum.Material): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Size = size
+	part.CFrame = cframe
+	part.Color = color
+	part.Material = material
+	part.Parent = parent
+	return part
+end
 
-	local chest = Instance.new("Part")
-	chest.Name = chestId
-	chest.Anchored = true
-	chest.CanCollide = true
-	chest.Size = Vector3.new(3, 3, 3)
-	chest.CFrame = cframe
-	chest.Color = LOCKED_COLOR
-	chest.Parent = parent
+-- The lid, hinged along the back of the body's top edge. Returns the lid and
+-- the hinge it turns about.
+local function buildLid(chest: Part): (Part, CFrame)
+	local top = chest.CFrame * CFrame.new(0, BODY_SIZE.Y / 2, 0)
+	local hinge = top * CFrame.new(0, 0, BODY_SIZE.Z / 2)
+	local lid = decor(chest, "Lid", LID_SIZE, hinge * CFrame.new(0, LID_SIZE.Y / 2, -LID_SIZE.Z / 2), WOOD_COLOR, Enum.Material.WoodPlanks)
 
+	-- The iron band and gold lock move with the lid, so they're welded to it.
+	local band = decor(lid, "LidBand", Vector3.new(0.35, LID_SIZE.Y + 0.05, LID_SIZE.Z + 0.05), lid.CFrame, IRON_COLOR, Enum.Material.Metal)
+	local lock = decor(lid, "Lock", Vector3.new(0.6, 0.6, 0.2), lid.CFrame * CFrame.new(0, -0.25, -LID_SIZE.Z / 2 - 0.1), GOLD_COLOR, Enum.Material.Metal)
+	for _, piece in { band, lock } do
+		piece.Anchored = false
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = lid
+		weld.Part1 = piece
+		weld.Parent = piece
+	end
+
+	return lid, hinge
+end
+
+local function openLid(lid: Part, hinge: CFrame)
+	local closedOffset = hinge:ToObjectSpace(lid.CFrame)
+	local opened = hinge * CFrame.Angles(LID_OPEN_ANGLE, 0, 0) * closedOffset
+
+	TweenService:Create(lid, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { CFrame = opened }):Play()
+end
+
+-- A shower of gold from the open chest. Emitters switched on and off on the
+-- server replicate; a one-shot Emit() would only play on the server.
+local function goldBurst(chest: Part)
+	local attachment = Instance.new("Attachment")
+	attachment.Position = Vector3.new(0, BODY_SIZE.Y / 2, 0)
+	attachment.Parent = chest
+
+	local sparkles = Instance.new("ParticleEmitter")
+	sparkles.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	sparkles.Color = ColorSequence.new(GOLD_COLOR)
+	sparkles.LightEmission = 1
+	sparkles.Size = NumberSequence.new(0.6, 0)
+	sparkles.Lifetime = NumberRange.new(0.6, 1.1)
+	sparkles.Speed = NumberRange.new(8, 14)
+	sparkles.EmissionDirection = Enum.NormalId.Top
+	sparkles.SpreadAngle = Vector2.new(40, 40)
+	sparkles.Acceleration = Vector3.new(0, -18, 0)
+	sparkles.Rate = 120
+	sparkles.Parent = attachment
+
+	task.delay(0.35, function()
+		sparkles.Enabled = false
+	end)
+	task.delay(2, function()
+		attachment:Destroy()
+	end)
+end
+
+local function buildBarrier(chest: Part): Part
 	local barrier = Instance.new("Part")
 	barrier.Name = "Barrier"
+	barrier.Shape = Enum.PartType.Ball
 	barrier.Anchored = true
 	barrier.CanCollide = false
+	barrier.CanQuery = false
 	barrier.CanTouch = false
-	barrier.Size = Vector3.new(4, 4, 4)
-	barrier.CFrame = cframe
-	barrier.Color = Color3.fromRGB(255, 0, 0)
+	barrier.CastShadow = false
+	barrier.Size = Vector3.new(5, 5, 5)
+	barrier.CFrame = chest.CFrame * CFrame.new(0, 0.5, 0)
+	barrier.Color = Color3.fromRGB(255, 60, 60)
 	barrier.Material = Enum.Material.ForceField
-	barrier.Transparency = 0.5
 	barrier.Parent = chest
 
-	local opened = false
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(255, 60, 60)
+	light.Brightness = 1
+	light.Range = 8
+	light.Parent = barrier
 
-	EnemyAI.onDeath(guard, function()
-		-- Already unlocked by an earlier kill.
-		if barrier.Parent == nil then
+	return barrier
+end
+
+-- Returns the chest, and a function that unlocks it (safe to call twice).
+function ChestService.createChest(spec: ChestSpec): (Part, () -> ())
+	local loot = spec.loot
+
+	-- The body is the chest: it collides, and carries the prompt once unlocked.
+	local chest = Instance.new("Part")
+	chest.Name = spec.name
+	chest.Anchored = true
+	chest.CanCollide = true
+	chest.Size = BODY_SIZE
+	chest.CFrame = spec.floorCFrame * CFrame.new(0, BODY_SIZE.Y / 2, 0)
+	chest.Color = WOOD_COLOR
+	chest.Material = Enum.Material.WoodPlanks
+	chest.Parent = spec.parent
+
+	for _, x in { -1.1, 1.1 } do
+		decor(chest, "Band", Vector3.new(0.35, BODY_SIZE.Y + 0.05, BODY_SIZE.Z + 0.05), chest.CFrame * CFrame.new(x, 0, 0), IRON_COLOR, Enum.Material.Metal)
+	end
+
+	local lid, hinge = buildLid(chest)
+	local locked = #spec.guards > 0 or spec.startsLocked == true
+	local barrier: Part? = if locked then buildBarrier(chest) else nil
+	local opened = false
+	local unlocked = false
+
+	local function unlock()
+		if unlocked then
 			return
 		end
+		unlocked = true
 
-		barrier:Destroy()
-		chest.Color = UNLOCKED_COLOR
+		if barrier then
+			barrier:Destroy()
+			barrier = nil
+		end
 
-		-- No prompt exists until the guard falls, so a locked chest simply
+		-- A warm glow saying "this is yours now".
+		local glow = Instance.new("PointLight")
+		glow.Name = "UnlockedGlow"
+		glow.Color = GOLD_COLOR
+		glow.Brightness = 2
+		glow.Range = 12
+		glow.Parent = lid
+
+		-- No prompt exists until the chest unlocks, so a locked chest simply
 		-- cannot be interacted with.
 		local prompt = Instance.new("ProximityPrompt")
 		prompt.ObjectText = "Chest"
@@ -78,7 +206,7 @@ function ChestService.createChest(cframe: CFrame, guard: EnemyAI.Enemy, parent: 
 			-- consuming it and losing the item.
 			if not InventoryService.hasRoom(player) then
 				Remotes.get("ChestOpened"):FireClient(player, {
-					chestId = chestId,
+					chestId = spec.name,
 					loot = {},
 					inventoryFull = true,
 				})
@@ -87,6 +215,9 @@ function ChestService.createChest(cframe: CFrame, guard: EnemyAI.Enemy, parent: 
 
 			opened = true
 			prompt.Enabled = false
+			openLid(lid, hinge)
+			goldBurst(chest)
+			glow.Brightness = 0.8
 
 			InventoryService.addItem(player, {
 				itemId = loot.itemId,
@@ -95,14 +226,44 @@ function ChestService.createChest(cframe: CFrame, guard: EnemyAI.Enemy, parent: 
 				classTag = loot.classTag,
 			})
 
+			if spec.coins > 0 then
+				CurrencyService.grant(player, spec.coins, 0)
+			end
+
 			Remotes.get("ChestOpened"):FireClient(player, {
-				chestId = chestId,
+				chestId = spec.name,
 				loot = { loot },
 			})
 		end)
-	end)
+	end
 
-	return chest
+	if not locked then
+		unlock()
+		return chest, unlock
+	end
+
+	if #spec.guards == 0 then
+		return chest, unlock
+	end
+
+	local remaining = #spec.guards
+	for _, guard in spec.guards do
+		local counted = false
+		EnemyAI.onDeath(guard, function()
+			-- Each guard counts once, even if something revived it.
+			if counted then
+				return
+			end
+			counted = true
+
+			remaining -= 1
+			if remaining == 0 then
+				unlock()
+			end
+		end)
+	end
+
+	return chest, unlock
 end
 
 return ChestService

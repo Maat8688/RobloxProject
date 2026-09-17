@@ -8,9 +8,9 @@
 -- out of the same selector with no per-enemy branches. Adding an enemy type
 -- should be adding a row here, plus a LootTables entry for its chest.
 --
--- Dungeon rooms are 40 studs across (RoomTemplates), and enemies are leashed
--- to their room, so preferredRange and attack bands are sized to fit inside
--- one.
+-- Enemies are leashed to their room, and rooms come in several sizes
+-- (DungeonDefs), so preferredRange must fit inside the smallest room each
+-- enemy can be placed in. A test checks it against the dungeon's pools.
 
 -- Damage that keeps ticking after a hit lands. The "unavoidable chip damage"
 -- half of DESIGN.md's healer pillar: a mistimed dodge isn't one number a Tank
@@ -43,6 +43,10 @@ export type AttackDef = {
 	cooldown: number,
 	-- Applied only when the hit lands unparried.
 	dot: DotDef?,
+	-- A player's hit can't interrupt this windup. Heavy attacks carry it, so
+	-- the answer to them is a parry, a block or a dodge — never just hitting
+	-- first. Light attacks don't, so attacking into them is a real option.
+	hyperArmor: boolean?,
 }
 
 export type EnemyDef = {
@@ -91,6 +95,7 @@ local EnemyDefs: { [string]: EnemyDef } = {
 			},
 			-- Deliberately unparryable: the player has to move out of it.
 			GroundSlam = {
+				hyperArmor = true,
 				telegraphDuration = 1.8,
 				parryable = false,
 				damage = 20,
@@ -130,6 +135,7 @@ local EnemyDefs: { [string]: EnemyDef } = {
 				cooldown = 0,
 			},
 			GroundSlam = {
+				hyperArmor = true,
 				telegraphDuration = 0.9,
 				parryable = false,
 				damage = 25,
@@ -172,6 +178,7 @@ local EnemyDefs: { [string]: EnemyDef } = {
 			-- winding up, so maxRange must not exceed range — a lunge started
 			-- beyond its reach could only ever miss.
 			Lunge = {
+				hyperArmor = true,
 				telegraphDuration = 1.1,
 				parryable = true,
 				damage = 16,
@@ -211,6 +218,7 @@ local EnemyDefs: { [string]: EnemyDef } = {
 			-- Unparryable panic option when something is in its face, so
 			-- closing the gap isn't a free win.
 			Spray = {
+				hyperArmor = true,
 				telegraphDuration = 1.0,
 				parryable = false,
 				damage = 8,
@@ -220,6 +228,74 @@ local EnemyDefs: { [string]: EnemyDef } = {
 				maxRange = 8,
 				weight = 5,
 				cooldown = 5,
+			},
+		},
+	},
+
+	-- The dungeon boss, and the only enemy in the boss room. Group content:
+	-- health is tuned for a party, and every tool the game teaches comes back
+	-- at once. A fast parryable Cleave, a slow Overhead that hits hardest and
+	-- staggers longest when parried, a Shockwave you must run from that leaves
+	-- a bleed, and a BoneSpear so backing off to heal is never fully safe.
+	-- The rig is 1.6x size (RigDefs), so its centre sits ~3 studs further back
+	-- than a normal enemy's; ranges are measured centre to centre and
+	-- allow for that.
+	HollowKing = {
+		displayName = "The Hollow King",
+		maxHealth = 600,
+		attackInterval = 0.8,
+		preferredRange = 8,
+		moveSpeed = 7,
+		aggroRange = 90,
+		coinReward = 250,
+		crystalReward = 4,
+		attacks = {
+			Cleave = {
+				telegraphDuration = 0.65,
+				parryable = true,
+				damage = 18,
+				range = 13,
+				arcDegrees = 150,
+				minRange = 0,
+				maxRange = 12,
+				weight = 4,
+				cooldown = 0,
+			},
+			Overhead = {
+				hyperArmor = true,
+				telegraphDuration = 1.1,
+				parryable = true,
+				damage = 30,
+				range = 12,
+				arcDegrees = 70,
+				minRange = 0,
+				maxRange = 11,
+				weight = 2,
+				cooldown = 3,
+			},
+			Shockwave = {
+				hyperArmor = true,
+				telegraphDuration = 1.4,
+				parryable = false,
+				damage = 26,
+				range = 20,
+				arcDegrees = 360,
+				minRange = 0,
+				maxRange = 14,
+				weight = 2,
+				cooldown = 8,
+				dot = { tickDamage = 5, tickInterval = 1, ticks = 4 },
+			},
+			BoneSpear = {
+				telegraphDuration = 1.2,
+				parryable = true,
+				damage = 18,
+				range = 34,
+				arcDegrees = 18,
+				minRange = 13,
+				maxRange = 32,
+				weight = 3,
+				cooldown = 3.5,
 			},
 		},
 	},

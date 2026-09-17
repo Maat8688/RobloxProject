@@ -29,7 +29,7 @@ local Enum = roblox.Enum
 
 local OUT_DIR = "workbench"
 local OUT_FILE = `{OUT_DIR}/AnimationWorkbench.rbxm`
-local RIG_SPACING = 12
+local RIG_SPACING = 14
 
 local shared = SharedModules.load("src/shared")
 local AnimationDefs = shared.AnimationDefs
@@ -45,12 +45,23 @@ local api = {
 	Enum = Enum,
 }
 
--- Symmetric in-out curves only: Roblox's legacy pose easing swaps In and Out,
--- and a symmetric curve means the same thing either way.
 local EASING = {
 	Linear = Enum.PoseEasingStyle.Linear,
 	Smooth = Enum.PoseEasingStyle.Cubic,
 	Hold = Enum.PoseEasingStyle.Constant,
+	In = Enum.PoseEasingStyle.Cubic,
+	Out = Enum.PoseEasingStyle.Cubic,
+}
+
+-- Roblox's pose easing directions are named the other way round from
+-- TweenService's: PoseEasingDirection.Out is the curve that starts slow. So
+-- our "In" (slow start) is written as Out, and "Out" as In.
+local EASING_DIRECTION = {
+	Linear = Enum.PoseEasingDirection.InOut,
+	Smooth = Enum.PoseEasingDirection.InOut,
+	Hold = Enum.PoseEasingDirection.InOut,
+	In = Enum.PoseEasingDirection.Out,
+	Out = Enum.PoseEasingDirection.In,
 }
 
 local PRIORITY = {
@@ -70,12 +81,14 @@ for _, part in RigDefs.SKELETON do
 	table.insert(childrenOf[part.parent], part.name)
 end
 
-local function poseCFrame(values: any): any
-	return CFrame.new(values.px, values.py, values.pz)
+-- Offsets are authored for a size-1 rig and scaled to the rig they play on,
+-- exactly as RigAnimation does in game.
+local function poseCFrame(values: any, scale: number): any
+	return CFrame.new(values.px * scale, values.py * scale, values.pz * scale)
 		* CFrame.Angles(math.rad(values.rx), math.rad(values.ry), math.rad(values.rz))
 end
 
-local function buildSequence(name: string, anim: any): any
+local function buildSequence(name: string, anim: any, scale: number): any
 	local animated: { [string]: boolean } = {}
 	for _, part in KeyframeMath.partsOf(anim) do
 		animated[part] = true
@@ -108,6 +121,7 @@ local function buildSequence(name: string, anim: any): any
 		frame.Parent = sequence
 
 		local style = EASING[keyframe.easing or "Smooth"]
+		local direction = EASING_DIRECTION[keyframe.easing or "Smooth"]
 
 		local function addPose(part: string, parent: any)
 			local pose = Instance.new("Pose")
@@ -117,10 +131,10 @@ local function buildSequence(name: string, anim: any): any
 				-- Every animated part gets an explicit pose in every keyframe:
 				-- a part a keyframe leaves out is at rest there, and writing that
 				-- down keeps the editor from interpolating across it.
-				pose.CFrame = poseCFrame(KeyframeMath.resolve(keyframe.poses[part]))
+				pose.CFrame = poseCFrame(KeyframeMath.resolve(keyframe.poses[part]), scale)
 				pose.Weight = 1
 				pose.EasingStyle = style
-				pose.EasingDirection = Enum.PoseEasingDirection.InOut
+				pose.EasingDirection = direction
 			else
 				-- A structural pose, as the Animation Editor writes for parents
 				-- of animated parts: it isn't a key.
@@ -176,8 +190,9 @@ notes.Parent = workbench
 local sequenceCount = 0
 
 for index, rigId in rigIds do
-	-- Root centre at y = 3 puts the feet on the floor.
-	local rig = RigAssembly.build(api, rigId, CFrame.new((index - 1) * RIG_SPACING, RigDefs.ROOT_SIZE[2] / 2, 0))
+	-- Root centre at half the hitbox's height puts the feet on the floor.
+	local rootHeight = RigDefs.rootSize(rigId)[2]
+	local rig = RigAssembly.build(api, rigId, CFrame.new((index - 1) * RIG_SPACING, rootHeight / 2, 0))
 
 	-- Where the Animation Editor keeps a rig's saved animations.
 	local saves = Instance.new("ObjectValue")
@@ -192,7 +207,7 @@ for index, rigId in rigIds do
 	table.sort(names)
 
 	for _, name in names do
-		buildSequence(name, animations[name]).Parent = saves
+		buildSequence(name, animations[name], RigDefs.scaleOf(rigId)).Parent = saves
 		sequenceCount += 1
 	end
 
@@ -336,12 +351,19 @@ for _, rigId in rigIds do
 		partsByName[def.name] = rig:FindFirstChild(def.name)
 	end
 
+	-- Tolerances grow with the rig, so a bigger rig is held to the same
+	-- standard relative to its size.
+	local scale = RigDefs.scaleOf(rigId)
+	local sinkTolerance = SINK_TOLERANCE * scale
+	local plantedTolerance = PLANTED_TOLERANCE * scale
+	local lyingMaxHeight = LYING_MAX_HEIGHT * scale
+
 	local function solve(pose: any): { [string]: any }
 		local world: { [string]: any } = { HumanoidRootPart = root.CFrame }
 		for _, def in RigDefs.SKELETON do
 			local joint = partsByName[def.name]:FindFirstChild(def.joint)
 			local values = pose[def.name]
-			local transform = if values then poseCFrame(values) else CFrame.new()
+			local transform = if values then poseCFrame(values, scale) else CFrame.new()
 			world[def.name] = world[def.parent] * joint.C0 * transform * joint.C1:Inverse()
 		end
 		return world
@@ -355,7 +377,7 @@ for _, rigId in rigIds do
 			for partName, cframe in world do
 				if partName ~= "HumanoidRootPart" then
 					local bottom = lowestPoint(cframe, partsByName[partName].Size)
-					if bottom < FLOOR_Y - SINK_TOLERANCE then
+					if bottom < FLOOR_Y - sinkTolerance then
 						problem(string.format("%s/%s: %s sinks to y=%.2f at t=%.2f", rigId, name, partName, bottom, t))
 					end
 				end
@@ -364,7 +386,7 @@ for _, rigId in rigIds do
 			if name == "idle" then
 				for _, foot in FEET do
 					local bottom = lowestPoint(world[foot], partsByName[foot].Size)
-					if math.abs(bottom - FLOOR_Y) > PLANTED_TOLERANCE then
+					if math.abs(bottom - FLOOR_Y) > plantedTolerance then
 						problem(string.format("%s/idle: %s not planted (y=%.2f) at t=%.2f", rigId, foot, bottom, t))
 					end
 				end
@@ -374,7 +396,7 @@ for _, rigId in rigIds do
 		if name == "death" then
 			local final = solve(KeyframeMath.sample(anim, anim.length))
 			local torsoHeight = final.LowerTorso.Position.Y
-			if torsoHeight > LYING_MAX_HEIGHT then
+			if torsoHeight > lyingMaxHeight then
 				problem(string.format("%s/death: ends with the hips %.2f off the floor", rigId, torsoHeight))
 			end
 		end

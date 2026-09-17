@@ -130,7 +130,7 @@ function ArenaService.start(originCFrame: CFrame)
 	originReturnCFrame = originCFrame * CFrame.new(RETURN_OFFSET)
 	arenaBaseCFrame = originCFrame * CFrame.new(ARENA_OFFSET)
 
-	local arena = RoomTemplates.build("Empty", arenaBaseCFrame, false, false)
+	local arena = RoomTemplates.build({ variant = "Empty", size = 40, doors = {} }, arenaBaseCFrame)
 	arena.model.Name = "Arena"
 	arena.model.Parent = Workspace
 
@@ -139,9 +139,42 @@ function ArenaService.start(originCFrame: CFrame)
 	stand.Anchored = true
 	stand.CanCollide = true
 	stand.Size = Vector3.new(2, 4, 2)
-	stand.Color = Color3.fromRGB(13, 105, 172)
+	stand.Color = Color3.fromRGB(60, 58, 70)
+	stand.Material = Enum.Material.Slate
 	stand.CFrame = originCFrame * CFrame.new(QUEUE_STAND_OFFSET)
 	stand.Parent = Workspace
+
+	-- Crossed blades over a blue glow, so it reads as "fight here" from across
+	-- the room. Decoration only.
+	local glow = Instance.new("Part")
+	glow.Name = "Glow"
+	glow.Anchored = true
+	glow.CanCollide = false
+	glow.CanQuery = false
+	glow.Material = Enum.Material.Neon
+	glow.Color = Color3.fromRGB(40, 140, 255)
+	glow.Size = Vector3.new(1.6, 0.1, 1.6)
+	glow.CFrame = stand.CFrame * CFrame.new(0, 2.05, 0)
+	glow.Parent = stand
+
+	local light = Instance.new("PointLight")
+	light.Color = glow.Color
+	light.Brightness = 1.5
+	light.Range = 10
+	light.Parent = glow
+
+	for _, angle in { 35, -35 } do
+		local blade = Instance.new("Part")
+		blade.Name = "CrossedBlade"
+		blade.Anchored = true
+		blade.CanCollide = false
+		blade.CanQuery = false
+		blade.Material = Enum.Material.Metal
+		blade.Color = Color3.fromRGB(196, 202, 212)
+		blade.Size = Vector3.new(0.15, 3, 0.35)
+		blade.CFrame = stand.CFrame * CFrame.new(0, 3.6, 0) * CFrame.Angles(0, 0, math.rad(angle))
+		blade.Parent = stand
+	end
 
 	local prompt = Instance.new("ProximityPrompt")
 	prompt.ObjectText = "Duel Arena"

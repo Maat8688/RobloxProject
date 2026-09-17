@@ -81,7 +81,7 @@ end)
 
 describe("KeyframeMath.ease", function()
 	it("pins both ends for every easing", function()
-		for _, easing in { "Linear", "Smooth" } do
+		for _, easing in { "Linear", "Smooth", "In", "Out" } do
 			expect(KeyframeMath.ease(easing :: any, 0)).toBe(0)
 			expect(KeyframeMath.ease(easing :: any, 1)).toBe(1)
 		end
@@ -90,6 +90,12 @@ describe("KeyframeMath.ease", function()
 	it("is symmetric for Smooth", function()
 		expect(KeyframeMath.ease("Smooth", 0.5)).toBeCloseTo(0.5, 9)
 		expect(KeyframeMath.ease("Smooth", 0.2) + KeyframeMath.ease("Smooth", 0.8)).toBeCloseTo(1, 9)
+	end)
+
+	it("starts slow for In and fast for Out, mirroring each other", function()
+		expect(KeyframeMath.ease("In", 0.5) < 0.5).toBe(true)
+		expect(KeyframeMath.ease("Out", 0.5) > 0.5).toBe(true)
+		expect(KeyframeMath.ease("In", 0.3) + KeyframeMath.ease("Out", 0.7)).toBeCloseTo(1, 9)
 	end)
 
 	it("clamps alpha", function()

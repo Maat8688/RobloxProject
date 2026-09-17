@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local AttackSelector = require(Shared.AttackSelector)
+local DungeonDefs = require(Shared.DungeonDefs)
 local EnemyDefs = require(Shared.EnemyDefs)
 
 local JestGlobals = require(ReplicatedStorage.DevPackages.JestGlobals)
@@ -205,13 +206,19 @@ describe("EnemyDefs invariants", function()
 		end
 	end)
 
-	-- Rooms are 40 studs across and enemies are leashed inside them, so an
-	-- enemy that wants to stand further away than the room allows would pin
-	-- itself to a wall and never reach its preferred spacing.
-	it("keeps every preferred range inside a single room", function()
-		local ROOM_DIAGONAL_HALF = 40 / 2 * math.sqrt(2)
+	-- Enemies are leashed inside their room, so one that wants to stand
+	-- further away than the room allows would pin itself to a wall and never
+	-- reach its preferred spacing. This checks the smallest room of all; the
+	-- per-pool check against each enemy's own smallest room is in
+	-- DungeonLayout.spec.
+	it("keeps every preferred range inside the smallest room", function()
+		local smallest = math.huge
+		for _, size in DungeonDefs.SIZES do
+			smallest = math.min(smallest, size)
+		end
+		local diagonalHalf = smallest / 2 * math.sqrt(2)
 		for enemyId, def in EnemyDefs do
-			expect({ enemyId, def.preferredRange <= ROOM_DIAGONAL_HALF }).toEqual({ enemyId, true })
+			expect({ enemyId, def.preferredRange <= diagonalHalf }).toEqual({ enemyId, true })
 		end
 	end)
 end)

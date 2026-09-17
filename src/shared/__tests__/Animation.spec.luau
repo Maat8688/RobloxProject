@@ -169,12 +169,22 @@ describe("Animation coverage", function()
 		end
 	end)
 
-	it("animates every weapon's swing, and the parry", function()
-		for weaponId in WeaponDefs do
-			local name = AnimationDefs.swing(weaponId)
+	it("animates every weapon's combo, critical, guard and stance, and the dodge", function()
+		local function has(name: string)
 			check(name, AnimationDefs.get(RigDefs.PLAYER_RIG, name) ~= nil)
 		end
-		check("parry", AnimationDefs.get(RigDefs.PLAYER_RIG, AnimationDefs.PARRY) ~= nil)
+
+		for weaponId, def in WeaponDefs do
+			for step = 1, #def.attack.combo do
+				has(AnimationDefs.swing(weaponId, step))
+			end
+			has(AnimationDefs.critical(weaponId))
+			has(AnimationDefs.guard(weaponId))
+			has(AnimationDefs.stance(weaponId))
+		end
+		has(AnimationDefs.DODGE)
+		has(AnimationDefs.GUARD_BREAK)
+		has(AnimationDefs.HURT)
 	end)
 
 	it("only has animations for rigs that exist", function()
@@ -266,19 +276,27 @@ describe("Animation shape", function()
 		end)
 	end)
 
-	it("gives every attack and swing an impact, and nothing else one", function()
+	it("gives every attack, swing and critical an impact, and nothing else one", function()
 		eachAnimation(function(label, anim)
 			local name = string.match(label, "/(.+)$") :: string
-			local isStrike = string.sub(name, 1, 7) == "attack_" or string.sub(name, 1, 6) == "swing_"
+			local isStrike = string.sub(name, 1, 7) == "attack_"
+				or string.sub(name, 1, 6) == "swing_"
+				or string.sub(name, 1, 9) == "critical_"
 			check(`{label} impact`, (anim.impact ~= nil) == isStrike)
 		end)
 	end)
 
-	-- Walking keeps working underneath a swing only if the swing leaves the
-	-- hips and legs alone.
-	it("never poses a player's hips or legs", function()
+	-- Walking keeps working underneath a stance or a held guard only if they
+	-- leave the hips and legs alone. (Strikes and dodges may pose them: those
+	-- are short, and slow the player right down while they play.)
+	it("never poses a player's hips or legs in a stance or guard", function()
 		local lower = { "LowerTorso", "RightUpperLeg", "RightLowerLeg", "RightFoot", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot" }
 		for name, anim in AnimationDefs.BY_RIG[RigDefs.PLAYER_RIG] do
+			local held = string.sub(name, 1, 7) == "stance_"
+				or (string.sub(name, 1, 6) == "guard_" and name ~= AnimationDefs.GUARD_BREAK)
+			if not held then
+				continue
+			end
 			for _, part in KeyframeMath.partsOf(anim) do
 				check(`R15Player/{name} leaves {part} alone`, table.find(lower, part) == nil)
 			end

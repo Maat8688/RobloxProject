@@ -32,8 +32,10 @@ for _, part in RigDefs.SKELETON do
 	centers[part.name] = part.center
 end
 
-local function offset(api: Api, from: { number }, to: { number }): any
-	return api.CFrame.new(to[1] - from[1], to[2] - from[2], to[3] - from[3])
+-- The offset between two rig-space points, at the rig's scale.
+local function offset(api: Api, from: { number }, to: { number }, scale: number?): any
+	local s = scale or 1
+	return api.CFrame.new((to[1] - from[1]) * s, (to[2] - from[2]) * s, (to[3] - from[3]) * s)
 end
 
 local function color(api: Api, rgb: { number }): any
@@ -64,19 +66,20 @@ end
 -- including the root.
 function RigAssembly.attach(api: Api, root: any, rigId: string, parent: any): { [string]: any }
 	local style = RigDefs.styleOf(rigId)
+	local scale = RigDefs.scaleOf(rigId)
 	local parts: { [string]: any } = { HumanoidRootPart = root }
 	local rootCFrame = root.CFrame
 
 	for _, def in RigDefs.SKELETON do
 		local partStyle = RigDefs.partStyle(style, def.name)
 		local size = api.Vector3.new(
-			def.size[1] * (partStyle.width or 1),
-			def.size[2],
-			def.size[3] * (partStyle.depth or 1)
+			def.size[1] * (partStyle.width or 1) * scale,
+			def.size[2] * scale,
+			def.size[3] * (partStyle.depth or 1) * scale
 		)
 
 		local part = makePart(api, def.name, size, partStyle.color, partStyle.material, nil)
-		part.CFrame = rootCFrame * offset(api, ORIGIN, def.center)
+		part.CFrame = rootCFrame * offset(api, ORIGIN, def.center, scale)
 		part.Parent = parent
 
 		-- R15 convention: the joint lives in the part it moves, and C0/C1 both
@@ -85,8 +88,8 @@ function RigAssembly.attach(api: Api, root: any, rigId: string, parent: any): { 
 		joint.Name = def.joint
 		joint.Part0 = parts[def.parent]
 		joint.Part1 = part
-		joint.C0 = offset(api, centers[def.parent], def.pivot)
-		joint.C1 = offset(api, def.center, def.pivot)
+		joint.C0 = offset(api, centers[def.parent], def.pivot, scale)
+		joint.C1 = offset(api, def.center, def.pivot, scale)
 		joint.Parent = part
 
 		parts[def.name] = part
@@ -94,11 +97,11 @@ function RigAssembly.attach(api: Api, root: any, rigId: string, parent: any): { 
 
 	for _, decoration in style.decorations do
 		local host = parts[decoration.attachTo]
-		local size = api.Vector3.new(decoration.size[1], decoration.size[2], decoration.size[3])
+		local size = api.Vector3.new(decoration.size[1] * scale, decoration.size[2] * scale, decoration.size[3] * scale)
 		local piece = makePart(api, decoration.name, size, decoration.color, decoration.material, decoration.shape)
 		piece.Transparency = decoration.transparency or 0
 
-		local placement = offset(api, ORIGIN, decoration.offset)
+		local placement = offset(api, ORIGIN, decoration.offset, scale)
 		piece.CFrame = host.CFrame * placement
 		piece.Parent = parent
 
@@ -131,9 +134,10 @@ function RigAssembly.build(api: Api, rigId: string, cframe: any): any
 	local model = api.Instance.new("Model")
 	model.Name = rigId
 
+	local rootSize = RigDefs.rootSize(rigId)
 	local root = api.Instance.new("Part")
 	root.Name = "HumanoidRootPart"
-	root.Size = api.Vector3.new(RigDefs.ROOT_SIZE[1], RigDefs.ROOT_SIZE[2], RigDefs.ROOT_SIZE[3])
+	root.Size = api.Vector3.new(rootSize[1], rootSize[2], rootSize[3])
 	root.CFrame = cframe
 	root.Anchored = true
 	root.CanCollide = false

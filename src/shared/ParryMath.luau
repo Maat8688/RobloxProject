@@ -116,78 +116,45 @@ function ParryMath.evaluate(params: EvaluateParams): Evaluation
 	return { verdict = "parried", success = true, deltaMs = deltaMs }
 end
 
-export type Readiness = {
-	allowed: boolean,
-	reason: string?,
-}
-
--- Gating that happens before the timing question is even asked. The timestamp
--- check alone does not stop a client mashing parry every frame until one
--- lands, so stamina and the whiff lockout are what actually make timing
--- matter.
-function ParryMath.checkReadiness(stamina: number, lockoutUntil: number, serverNow: number): Readiness
-	if serverNow < lockoutUntil then
-		return { allowed = false, reason = "recovering" }
-	end
-
-	if stamina < CombatConstants.PARRY_STAMINA_COST then
-		return { allowed = false, reason = "exhausted" }
-	end
-
-	return { allowed = true }
+-- Whether a claimed press time is believable, as the server judges it. nil
+-- when it is; otherwise the rejection verdict. Used for parry and dodge
+-- presses alike, since both are reactions timed against a telegraph.
+function ParryMath.validateTimestamp(attemptTime: number, serverNow: number, halfPing: number): Verdict?
+	return checkTimestamp(attemptTime, serverNow, halfPing)
 end
 
-export type ParryCandidate = {
-	enemyId: string,
-	impactTime: number,
-	parryable: boolean,
-	-- How far the parrying player is from the attacker, and how far this
-	-- attack can reach. When both are given, an attack that couldn't reach the
-	-- player isn't a candidate at all.
-	distance: number?,
-	reach: number?,
-}
-
--- With more than one enemy winding up, a single parry press has to resolve to
--- exactly one incoming attack. The server decides, not the client — the client
--- never names a target.
---
--- Only attacks that could reach the player are considered. Without that, once
--- several rooms are running, a press could resolve against an enemy swinging
--- at someone else entirely.
---
--- Among those, the rule is "whichever lands nearest the moment you pressed".
--- Deliberately NOT "whichever parryable attack is nearest": if an unparryable
--- attack is the thing about to hit you, parrying should fail against it rather
--- than quietly redirect to a different enemy. Otherwise the player learns
--- nothing from the miss, and reading which attack lands first stops mattering
--- — which is the skill the telegraph system is supposed to be testing.
-function ParryMath.selectParryTarget(candidates: { ParryCandidate }, attemptTime: number): ParryCandidate?
-	local best: ParryCandidate? = nil
-	local bestGap = math.huge
-
-	for _, candidate in candidates do
-		local distance = candidate.distance
-		local reach = candidate.reach
-		if distance and reach and distance > reach then
-			continue
-		end
-
-		local gap = math.abs(candidate.impactTime - attemptTime)
-		if gap < bestGap then
-			best = candidate
-			bestGap = gap
-		end
-	end
-
-	return best
+-- Whether a parry press at `pressTime` catches a hit landing at `impactTime`:
+-- the press opened its frames no more than earlyTolerance before the hit, and
+-- no more than lateTolerance after it (the slack for a press and a hit that
+-- land within a frame of each other).
+function ParryMath.catches(pressTime: number, parryProfile: WeaponDefs.ParryProfile, impactTime: number): boolean
+	local delta = pressTime - impactTime
+	return delta >= -(parryProfile.earlyTolerance + BOUNDARY_EPSILON)
+		and delta <= parryProfile.lateTolerance + BOUNDARY_EPSILON
 end
 
--- Regen is time-based rather than tick-based so the result does not depend on
--- server framerate.
-function ParryMath.regenerateStamina(current: number, elapsedSeconds: number): number
-	local regenerated = current + CombatConstants.STAMINA_REGEN_PER_SECOND * elapsedSeconds
-	return math.min(regenerated, CombatConstants.MAX_STAMINA)
+-- Whether a new press gets parry frames. It doesn't if the previous press
+-- caught nothing and its cooldown (from the end of its frames) hasn't run out:
+-- such a press only blocks.
+function ParryMath.pressOpensFrames(
+	previousPressTime: number?,
+	previousCaught: boolean,
+	parryProfile: WeaponDefs.ParryProfile,
+	now: number
+): boolean
+	if previousPressTime == nil or previousCaught then
+		return true
+	end
+	return now >= previousPressTime + parryProfile.earlyTolerance + CombatConstants.PARRY_COOLDOWN
+end
+
+-- Whether `t` falls inside a window of `duration` starting at `startTime`
+-- (a dodge's invulnerability).
+function ParryMath.withinWindow(startTime: number?, duration: number, t: number): boolean
+	if startTime == nil then
+		return false
+	end
+	return t >= startTime - BOUNDARY_EPSILON and t <= startTime + duration + BOUNDARY_EPSILON
 end
 
 return ParryMath

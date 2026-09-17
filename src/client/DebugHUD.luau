@@ -1,19 +1,12 @@
 --!strict
--- The instrument the combat work exists to provide.
+-- A tuning readout for combat: the equipped weapon's parry frames, posture,
+-- stun and cooldowns, ping, and what the last parry, swing and hit did.
 --
--- Tuning parry windows by feel alone is guesswork — "that felt late" is not a
--- number you can move a constant by. This surfaces the millisecond delta on
--- every attempt, next to the ping that explains it, so the constants in
--- CombatConstants and WeaponDefs can be moved on evidence.
---
--- The target readout mirrors the server's rule exactly — ParryMath's
--- selectParryTarget over attacks within reach — because a HUD highlighting a
--- different attack than the one a parry will resolve against would actively
--- mislead a tuning session.
---
--- Replaced by real UI at build-order step 10.
+-- Hidden by default and only available in Studio (F2 toggles it): the game
+-- itself shows none of this, as in Deepwoken. It exists so constants in
+-- CombatConstants and WeaponDefs can be moved on evidence rather than feel.
 
-local CollectionService = game:GetService("CollectionService")
+local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -22,73 +15,49 @@ local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage.Shared
 local CombatConstants = require(Shared.CombatConstants)
-local DamageMath = require(Shared.DamageMath)
-local EnemyDefs = require(Shared.EnemyDefs)
 local Loadout = require(Shared.Loadout)
-local ParryMath = require(Shared.ParryMath)
+local PostureMath = require(Shared.PostureMath)
 local Remotes = require(Shared.Remotes)
 
 local DebugHUD = {}
 
--- A strike resolves at impact plus the grace period; past this the telegraph
--- is certainly over, whatever happened to it.
-local TELEGRAPH_EXPIRY = CombatConstants.STRIKE_RESOLUTION_GRACE + 0.5
+local TOGGLE_ACTION = "ToggleDebugHUD"
 
 local GREY = Color3.fromRGB(150, 150, 150)
 local WHITE = Color3.fromRGB(235, 235, 235)
-local ORANGE = Color3.fromRGB(255, 140, 60)
-
-local VERDICT_COLORS: { [string]: Color3 } = {
-	parried = Color3.fromRGB(120, 230, 140),
-	early = Color3.fromRGB(240, 200, 100),
-	late = Color3.fromRGB(240, 200, 100),
-	unparryable = ORANGE,
-	no_attack = Color3.fromRGB(180, 180, 180),
-	exhausted = Color3.fromRGB(180, 180, 180),
-	recovering = Color3.fromRGB(180, 180, 180),
-	unequipped = Color3.fromRGB(180, 180, 180),
-	rejected_future = Color3.fromRGB(255, 90, 90),
-	rejected_stale = Color3.fromRGB(255, 90, 90),
-}
-
-type Telegraph = {
-	attackId: string,
-	impactTime: number,
-	parryable: boolean,
-	root: BasePart?,
-	reach: number,
-}
-
-type EnemyInfo = {
-	alive: boolean,
-}
+local GOOD = Color3.fromRGB(120, 230, 140)
+local BAD = Color3.fromRGB(255, 100, 90)
 
 type State = {
 	weaponId: string?,
 	classTag: string?,
-	telegraphs: { [string]: Telegraph },
-	enemies: { [string]: EnemyInfo },
-	stamina: number,
-	staminaAt: number,
+	posture: number,
+	postureUpdatedAt: number,
+	postureDamagedAt: number,
+	stunnedUntil: number,
+	dodgeReadyAt: number,
+	criticalReadyAt: number,
 	riposteUntil: number,
-	lastVerdict: string?,
-	lastDeltaMs: number,
-	lastParryTarget: string?,
+	lastParry: string?,
 	lastSwing: string?,
+	lastHit: string?,
+	lastHitGood: boolean,
 }
 
 local state: State = {
 	weaponId = nil,
 	classTag = nil,
-	telegraphs = {},
-	enemies = {},
-	stamina = CombatConstants.MAX_STAMINA,
-	staminaAt = 0,
+	posture = 0,
+	postureUpdatedAt = 0,
+	postureDamagedAt = -math.huge,
+	stunnedUntil = 0,
+	dodgeReadyAt = 0,
+	criticalReadyAt = 0,
 	riposteUntil = 0,
-	lastVerdict = nil,
-	lastDeltaMs = 0,
-	lastParryTarget = nil,
+	lastParry = nil,
 	lastSwing = nil,
+	lastHit = nil,
+	lastHitGood = false,
 }
 
 local function makeLabel(parent: Instance, order: number, size: number): TextLabel
@@ -104,86 +73,36 @@ local function makeLabel(parent: Instance, order: number, size: number): TextLab
 	return label
 end
 
--- Server-side EnemyAI tags every enemy model with this.
-local ENEMY_TAG = "Enemy"
-
-local function findEnemyModel(enemyId: string): Model?
-	for _, tagged in CollectionService:GetTagged(ENEMY_TAG) do
-		if tagged:IsA("Model") and tagged:GetAttribute("EnemyId") == enemyId then
-			return tagged
-		end
-	end
-
-	return nil
-end
-
-local function reachOf(model: Model, attackId: string): number
-	local defId = model:GetAttribute("EnemyDefId")
-	local def = if typeof(defId) == "string" then EnemyDefs[defId] else nil
-	local attack = def and def.attacks[attackId]
-	-- Unknown attack: don't filter it out, since hiding a real threat is worse
-	-- than over-showing one.
-	if not attack then
-		return math.huge
-	end
-
-	return attack.range + CombatConstants.PARRY_RANGE_MARGIN
-end
-
--- Same candidates and same rule the server uses for a press made right now.
-local function currentTarget(now: number): (string?, Telegraph?)
-	local character = Players.LocalPlayer.Character
-	local myRoot = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	local candidates: { ParryMath.ParryCandidate } = {}
-
-	for enemyId, telegraph in state.telegraphs do
-		local enemyRoot = telegraph.root
-		local distance: number? = nil
-		if myRoot and enemyRoot then
-			distance = DamageMath.horizontalDistance(
-				{ x = myRoot.Position.X, z = myRoot.Position.Z },
-				{ x = enemyRoot.Position.X, z = enemyRoot.Position.Z }
-			)
-		end
-
-		table.insert(candidates, {
-			enemyId = enemyId,
-			impactTime = telegraph.impactTime,
-			parryable = telegraph.parryable,
-			distance = distance,
-			reach = telegraph.reach,
-		})
-	end
-
-	local best = ParryMath.selectParryTarget(candidates, now)
-	if not best then
-		return nil, nil
-	end
-
-	return best.enemyId, state.telegraphs[best.enemyId]
+local function remaining(until_: number, now: number): string
+	local left = until_ - now
+	return if left > 0 then string.format("%.1fs", left) else "ready"
 end
 
 function DebugHUD.start()
+	if not RunService:IsStudio() then
+		return
+	end
+
 	local player = Players.LocalPlayer
 
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "CombatDebugHUD"
 	gui.ResetOnSpawn = false
 	gui.IgnoreGuiInset = true
+	gui.Enabled = false
 	gui.Parent = player:WaitForChild("PlayerGui")
 
 	local frame = Instance.new("Frame")
-	frame.Size = UDim2.fromOffset(420, 250)
-	frame.Position = UDim2.fromOffset(16, 16)
+	frame.Size = UDim2.fromOffset(380, 200)
+	frame.Position = UDim2.fromOffset(16, 60)
 	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 	frame.BackgroundTransparency = 0.25
 	frame.BorderSizePixel = 0
 	frame.Parent = gui
 
 	local padding = Instance.new("UIPadding")
-	padding.PaddingTop = UDim.new(0, 10)
+	padding.PaddingTop = UDim.new(0, 8)
 	padding.PaddingLeft = UDim.new(0, 12)
-	padding.PaddingRight = UDim.new(0, 12)
 	padding.Parent = frame
 
 	local layout = Instance.new("UIListLayout")
@@ -191,51 +110,39 @@ function DebugHUD.start()
 	layout.Padding = UDim.new(0, 2)
 	layout.Parent = frame
 
-	local classLabel = makeLabel(frame, 1, 15)
-	local targetLabel = makeLabel(frame, 2, 15)
-	local countdownLabel = makeLabel(frame, 3, 15)
-	local windowLabel = makeLabel(frame, 4, 13)
-	local staminaLabel = makeLabel(frame, 5, 13)
-	local roomLabel = makeLabel(frame, 6, 13)
-	local pingLabel = makeLabel(frame, 7, 13)
-	local swingLabel = makeLabel(frame, 8, 14)
-	local resultLabel = makeLabel(frame, 9, 20)
+	local weaponLabel = makeLabel(frame, 1, 14)
+	local framesLabel = makeLabel(frame, 2, 13)
+	local postureLabel = makeLabel(frame, 3, 13)
+	local cooldownLabel = makeLabel(frame, 4, 13)
+	local pingLabel = makeLabel(frame, 5, 13)
+	local parryLabel = makeLabel(frame, 6, 14)
+	local swingLabel = makeLabel(frame, 7, 14)
+	local hitLabel = makeLabel(frame, 8, 14)
+
+	ContextActionService:BindAction(TOGGLE_ACTION, function(_, inputState)
+		if inputState == Enum.UserInputState.Begin then
+			gui.Enabled = not gui.Enabled
+		end
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.KeyCode.F2)
 
 	Remotes.get("WeaponEquipped").OnClientEvent:Connect(function(payload)
 		state.weaponId = payload.weaponId
 		state.classTag = payload.classTag
 	end)
 
-	Remotes.get("EnemyTelegraphStart").OnClientEvent:Connect(function(payload)
-		local model = findEnemyModel(payload.enemyId)
-		state.telegraphs[payload.enemyId] = {
-			attackId = payload.attackId,
-			impactTime = payload.impactTime,
-			parryable = payload.parryable,
-			root = model and model.PrimaryPart,
-			reach = if model then reachOf(model, payload.attackId) else math.huge,
-		}
+	Remotes.get("CombatStateChanged").OnClientEvent:Connect(function(payload)
+		state.posture = payload.posture
+		state.postureUpdatedAt = payload.postureUpdatedAt
+		state.postureDamagedAt = payload.postureDamagedAt
+		state.stunnedUntil = payload.stunnedUntil
+		state.dodgeReadyAt = payload.dodgeReadyAt
+		state.criticalReadyAt = payload.criticalReadyAt
+		state.riposteUntil = payload.riposteUntil
 	end)
 
 	Remotes.get("ParryResult").OnClientEvent:Connect(function(payload)
-		state.lastVerdict = payload.verdict
-		state.lastDeltaMs = payload.deltaMs
-		state.lastParryTarget = payload.enemyId
-		-- Authoritative values; the readout predicts forward from here.
-		state.stamina = payload.stamina
-		state.staminaAt = Workspace:GetServerTimeNow()
-		state.riposteUntil = payload.riposteUntil or 0
-	end)
-
-	Remotes.get("EnemyStaggered").OnClientEvent:Connect(function(payload)
-		state.telegraphs[payload.enemyId] = nil
-	end)
-
-	Remotes.get("EnemyHealthChanged").OnClientEvent:Connect(function(payload)
-		state.enemies[payload.enemyId] = { alive = payload.alive }
-		if not payload.alive then
-			state.telegraphs[payload.enemyId] = nil
-		end
+		state.lastParry = string.format("PARRIED  %+.0f ms from impact  vs %s", payload.deltaMs, tostring(payload.enemyId))
 	end)
 
 	Remotes.get("AttackResult").OnClientEvent:Connect(function(payload)
@@ -247,105 +154,59 @@ function DebugHUD.start()
 	end)
 
 	Remotes.get("PlayerHit").OnClientEvent:Connect(function(payload)
-		resultLabel.Text = string.format("%s  -%.0f", if payload.bleed then "BLEED" else "HIT", payload.amount)
-		resultLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
+		if payload.dodged then
+			state.lastHit, state.lastHitGood = "DODGED", true
+		elseif payload.blocked then
+			state.lastHit, state.lastHitGood = "BLOCKED", true
+		elseif payload.guardBroken then
+			state.lastHit, state.lastHitGood = string.format("GUARD BROKEN  -%.0f", payload.amount), false
+		else
+			state.lastHit, state.lastHitGood = string.format("%s  -%.0f", if payload.bleed then "BLEED" else "HIT", payload.amount), false
+		end
 	end)
 
 	RunService.RenderStepped:Connect(function()
-		local now = Workspace:GetServerTimeNow()
-
-		-- A strike that landed unparried sends no event of its own, so expire
-		-- telegraphs by time rather than leaving them to pile up.
-		for enemyId, telegraph in state.telegraphs do
-			if now > telegraph.impactTime + TELEGRAPH_EXPIRY then
-				state.telegraphs[enemyId] = nil
-			end
+		if not gui.Enabled then
+			return
 		end
 
+		local now = Workspace:GetServerTimeNow()
 		local weaponId = state.weaponId
 		local weapon = if weaponId then Loadout.getDef(weaponId) else nil
 
 		if weapon then
-			local hint = if RunService:IsStudio() then "   [1/2/3]" else ""
-			classLabel.Text = `class    {state.classTag}  ({weapon.displayName}){hint}`
-			classLabel.TextColor3 = WHITE
-		else
-			classLabel.Text = "class    none — pick a weapon from a stand"
-			classLabel.TextColor3 = ORANGE
-		end
-
-		local targetId, telegraph = currentTarget(now)
-		if targetId and telegraph then
-			local kind = if telegraph.parryable then "PARRYABLE" else "UNPARRYABLE"
-			targetLabel.Text = `target   {targetId}  {telegraph.attackId}  [{kind}]`
-			targetLabel.TextColor3 = if telegraph.parryable then WHITE else ORANGE
-			countdownLabel.Text = string.format("impact   %+.0f ms", (telegraph.impactTime - now) * 1000)
-		else
-			targetLabel.Text = "target   none in reach"
-			targetLabel.TextColor3 = GREY
-			countdownLabel.Text = "impact   --"
-		end
-
-		if weapon then
-			local profile = weapon.parry
-			windowLabel.Text = string.format(
-				"window   %+.0f ms .. %+.0f ms   (%.0f ms wide)",
-				-profile.earlyTolerance * 1000,
-				profile.lateTolerance * 1000,
-				(profile.earlyTolerance + profile.lateTolerance) * 1000
+			weaponLabel.Text = `weapon   {weapon.displayName} ({state.classTag})   [1/2/3]`
+			framesLabel.Text = string.format(
+				"parry    %.0f ms frames, %.0f ms late slack, %.1fs cooldown on a miss",
+				weapon.parry.earlyTolerance * 1000,
+				weapon.parry.lateTolerance * 1000,
+				CombatConstants.PARRY_COOLDOWN
 			)
 		else
-			windowLabel.Text = "window   --"
+			weaponLabel.Text = "weapon   none — pick one from a stand"
+			framesLabel.Text = "parry    --"
 		end
 
-		local predicted = ParryMath.regenerateStamina(state.stamina, now - state.staminaAt)
-		staminaLabel.Text = string.format(
-			"stamina  %d / %d   (parry %d, swing %s)",
-			math.floor(predicted),
-			CombatConstants.MAX_STAMINA,
-			CombatConstants.PARRY_STAMINA_COST,
-			if weapon then tostring(weapon.attack.staminaCost) else "--"
+		local posture = PostureMath.regenerate(state.posture, state.postureUpdatedAt, state.postureDamagedAt, now)
+		local stun = state.stunnedUntil - now
+		postureLabel.Text = string.format(
+			"posture  %d / %d%s",
+			math.floor(posture),
+			CombatConstants.MAX_POSTURE,
+			if stun > 0 then string.format("   STUNNED %.1fs", stun) else ""
 		)
 
-		local alive, total, winding = 0, 0, 0
-		for _, info in state.enemies do
-			total += 1
-			if info.alive then
-				alive += 1
-			end
-		end
-		for _ in state.telegraphs do
-			winding += 1
-		end
-		roomLabel.Text = string.format("dungeon  %d/%d alive   %d winding up", alive, total, winding)
+		cooldownLabel.Text = `dodge    {remaining(state.dodgeReadyAt, now)}   critical {remaining(state.criticalReadyAt, now)}`
+			.. (if now < state.riposteUntil then string.format("   RIPOSTE %.1fs", state.riposteUntil - now) else "")
 
-		-- Ping explains late verdicts, and sets how wide a timestamp band the
-		-- server will believe (ParryMath.plausibleSendWindow).
 		local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 		pingLabel.Text = string.format("ping     %.0f ms", ping)
 
-		local riposteRemaining = state.riposteUntil - now
-		if riposteRemaining > 0 then
-			swingLabel.Text = string.format("swing    %s   RIPOSTE %.1fs", state.lastSwing or "--", riposteRemaining)
-			swingLabel.TextColor3 = Color3.fromRGB(255, 200, 120)
-		else
-			swingLabel.Text = `swing    {state.lastSwing or "--"}`
-			swingLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
-		end
-
-		if state.lastVerdict then
-			local against = if state.lastParryTarget then `  vs {state.lastParryTarget}` else ""
-			resultLabel.Text = string.format(
-				"%s  %+.0f ms%s",
-				string.upper(state.lastVerdict),
-				state.lastDeltaMs,
-				against
-			)
-			resultLabel.TextColor3 = VERDICT_COLORS[state.lastVerdict] or WHITE
-		else
-			resultLabel.Text = "F parry / click attack / I inventory"
-			resultLabel.TextColor3 = GREY
-		end
+		parryLabel.Text = state.lastParry or "parry    --"
+		parryLabel.TextColor3 = if state.lastParry then GOOD else GREY
+		swingLabel.Text = `swing    {state.lastSwing or "--"}`
+		hitLabel.Text = `taken    {state.lastHit or "--"}`
+		hitLabel.TextColor3 = if state.lastHit == nil then GREY elseif state.lastHitGood then GOOD else BAD
 	end)
 end
 

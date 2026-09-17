@@ -82,6 +82,10 @@ export type Decoration = {
 
 export type RigStyle = {
 	displayName: string,
+	-- Uniform size multiplier for the whole rig: parts, joints, decorations and
+	-- the hitbox. Animations stay authored at size 1; their offsets in studs
+	-- are scaled when played. 1 when unset.
+	scale: number?,
 	-- Style for any part not listed in `parts`.
 	default: PartStyle,
 	parts: { [string]: PartStyle },
@@ -216,6 +220,49 @@ local function playerStyle(): RigStyle
 	}
 end
 
+-- The dungeon boss: a crowned skeleton king in black iron, half again as big
+-- as anything else, dragging a greatsword.
+local function hollowKingStyle(): RigStyle
+	local iron = { 52, 50, 58 }
+	local trim = { 150, 120, 60 }
+	local ghostFire = { 110, 200, 255 }
+
+	local parts: { [string]: PartStyle } = {
+		UpperTorso = { color = iron, material = "Metal", width = 1.15, depth = 1.1 },
+		LowerTorso = { color = iron, material = "Metal", width = 1.05 },
+		Head = { color = BONE, width = 0.95, depth = 0.95 },
+	}
+	both(parts, "UpperArm", { color = iron, material = "Metal", width = 1.1, depth = 1.1 })
+	both(parts, "LowerArm", { color = BONE, width = 0.55, depth = 0.55 })
+	both(parts, "Hand", { color = iron, material = "Metal" })
+	both(parts, "UpperLeg", { color = iron, material = "Metal", width = 0.95, depth = 0.95 })
+	both(parts, "LowerLeg", { color = BONE, width = 0.55, depth = 0.55 })
+	both(parts, "Foot", { color = iron, material = "Metal" })
+
+	return {
+		displayName = "The Hollow King",
+		scale = 1.6,
+		default = { color = BONE },
+		parts = parts,
+		decorations = {
+			{ name = "CrownBand", attachTo = "Head", size = { 1.25, 0.25, 1.25 }, offset = { 0, 0.55, 0 }, color = trim, material = "Metal" },
+			{ name = "CrownSpikeFront", attachTo = "Head", size = { 0.18, 0.5, 0.18 }, offset = { 0, 0.9, -0.55 }, color = trim, material = "Metal" },
+			{ name = "CrownSpikeLeft", attachTo = "Head", size = { 0.18, 0.4, 0.18 }, offset = { -0.55, 0.85, 0 }, color = trim, material = "Metal" },
+			{ name = "CrownSpikeRight", attachTo = "Head", size = { 0.18, 0.4, 0.18 }, offset = { 0.55, 0.85, 0 }, color = trim, material = "Metal" },
+			{ name = "EyeRight", attachTo = "Head", size = { 0.28, 0.18, 0.05 }, offset = { 0.26, 0.1, -0.58 }, color = ghostFire, material = "Neon" },
+			{ name = "EyeLeft", attachTo = "Head", size = { 0.28, 0.18, 0.05 }, offset = { -0.26, 0.1, -0.58 }, color = ghostFire, material = "Neon" },
+			{ name = "Jaw", attachTo = "Head", size = { 0.7, 0.12, 0.05 }, offset = { 0, -0.35, -0.58 }, color = VOID },
+			{ name = "PauldronRight", attachTo = "RightUpperArm", size = { 1.1, 0.4, 1.1 }, offset = { 0.1, 0.55, 0 }, color = iron, material = "Metal" },
+			{ name = "PauldronLeft", attachTo = "LeftUpperArm", size = { 1.1, 0.4, 1.1 }, offset = { -0.1, 0.55, 0 }, color = iron, material = "Metal" },
+			{ name = "ChestSigil", attachTo = "UpperTorso", size = { 0.5, 0.5, 0.05 }, offset = { 0, 0.15, -0.58 }, color = ghostFire, material = "Neon" },
+			{ name = "Cape", attachTo = "UpperTorso", size = { 1.9, 2.6, 0.1 }, offset = { 0, -0.5, 0.62 }, color = { 70, 20, 30 }, material = "Fabric" },
+			{ name = "Greatsword", attachTo = "RightHand", size = { 0.18, 0.45, 4.4 }, offset = { 0, -0.05, -2.45 }, color = { 90, 96, 110 }, material = "Metal" },
+			{ name = "GreatswordEdge", attachTo = "RightHand", size = { 0.1, 0.1, 4.2 }, offset = { 0, 0.2, -2.45 }, color = ghostFire, material = "Neon" },
+			{ name = "GreatswordGuard", attachTo = "RightHand", size = { 1.3, 0.2, 0.2 }, offset = { 0, -0.05, -0.2 }, color = trim, material = "Metal" },
+		},
+	}
+end
+
 RigDefs.PLAYER_RIG = "R15Player"
 
 -- Keyed by rig id. An enemy's rig id is its EnemyDefs id.
@@ -224,6 +271,7 @@ RigDefs.STYLES = {
 	SkeletonWarrior = skeletonStyle(),
 	Shambler = shamblerStyle(),
 	Spitter = spitterStyle(),
+	HollowKing = hollowKingStyle(),
 	R15Player = playerStyle(),
 } :: { [string]: RigStyle }
 
@@ -231,6 +279,18 @@ function RigDefs.styleOf(rigId: string): RigStyle
 	local style = RigDefs.STYLES[rigId]
 	assert(style, `No rig style for "{rigId}"`)
 	return style
+end
+
+-- How much bigger than standard this rig is built.
+function RigDefs.scaleOf(rigId: string): number
+	local style = RigDefs.STYLES[rigId]
+	return if style and style.scale then style.scale else 1
+end
+
+-- The rig's hitbox size, scaled: { x, y, z }.
+function RigDefs.rootSize(rigId: string): { number }
+	local scale = RigDefs.scaleOf(rigId)
+	return { RigDefs.ROOT_SIZE[1] * scale, RigDefs.ROOT_SIZE[2] * scale, RigDefs.ROOT_SIZE[3] * scale }
 end
 
 function RigDefs.partStyle(style: RigStyle, partName: string): PartStyle

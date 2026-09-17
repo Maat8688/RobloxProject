@@ -19,7 +19,11 @@ local FOLDER_NAME = "Remotes"
 local REMOTE_EVENTS = {
 	-- Client -> Server
 	"ParryAttempt",
+	"GuardReleased",
 	"AttackRequest",
+	"CriticalRequest",
+	"FeintRequest",
+	"DodgeRequest",
 	"EquipWeapon",
 
 	-- Server -> Client: combat
@@ -31,6 +35,7 @@ local REMOTE_EVENTS = {
 	"AttackResult",
 	"HealBurst",
 	"PlayerCombatAction",
+	"CombatStateChanged",
 
 	-- Server -> Client: profile, equipment and economy
 	"ProfileLoaded",
@@ -39,6 +44,11 @@ local REMOTE_EVENTS = {
 	"InventoryUpdated",
 	"CurrencyUpdated",
 	"UpgradeResult",
+
+	-- Server -> Client: the dungeon run
+	"DungeonUpdated",
+	"DungeonNotice",
+	"BossEncounter",
 
 	-- Server -> Client: PvP
 	"PvPStatusChanged",

@@ -23,12 +23,33 @@ local EquipService = {}
 local equipped: { [Player]: string } = {}
 local upgradeLevels: { [Player]: { [string]: number } } = {}
 
+export type ChangedCallback = (player: Player, weaponId: string, upgradeLevel: number) -> ()
+local changedCallbacks: { ChangedCallback } = {}
+
 local function publish(player: Player, weaponId: string)
+	local level = EquipService.getUpgradeLevel(player, weaponId)
+
 	Remotes.get("WeaponEquipped"):FireClient(player, {
 		weaponId = weaponId,
 		classTag = Loadout.classOf(weaponId),
-		upgradeLevel = EquipService.getUpgradeLevel(player, weaponId),
+		upgradeLevel = level,
 	})
+
+	for _, callback in changedCallbacks do
+		-- One failing listener must not stop the others, or the client update
+		-- that already went out.
+		local ok, err = pcall(callback, player, weaponId, level)
+		if not ok then
+			warn(`EquipService change listener failed: {err}`)
+		end
+	end
+end
+
+-- Runs whenever a player's equipped weapon or its upgrade level changes,
+-- including when saved progress loads. Read-only: listeners draw what changed
+-- (WeaponVisuals) and must not change weapon state themselves.
+function EquipService.onChanged(callback: ChangedCallback)
+	table.insert(changedCallbacks, callback)
 end
 
 -- nil until the player picks a weapon from a stand. Combat ignores an

@@ -62,7 +62,8 @@ describe("WeaponDefs invariants", function()
 			expect(def.parry.earlyTolerance > 0).toBe(true)
 			expect(def.parry.lateTolerance > 0).toBe(true)
 			expect(def.attack.damage > 0).toBe(true)
-			expect(def.attack.staminaCost > 0).toBe(true)
+			expect(def.attack.critical.cooldown > 0).toBe(true)
+			expect(def.attack.critical.damageMultiplier > def.attack.combo[#def.attack.combo].damageMultiplier).toBe(true)
 			expect(def.attack.pvpTelegraph > 0).toBe(true)
 			expect(typeof(weaponId)).toBe("string")
 		end
@@ -115,6 +116,59 @@ describe("WeaponDefs invariants", function()
 		for _, def in WeaponDefs do
 			if def.payoff.riposteDuration > 0 then
 				expect(def.payoff.riposteMultiplier > CombatConstants.STAGGER_DAMAGE_MULTIPLIER).toBe(true)
+			end
+		end
+	end)
+end)
+
+describe("Loadout combos", function()
+	local attack = WeaponDefs.SwordAndShield.attack
+
+	it("starts a combo at the first swing", function()
+		expect(Loadout.nextComboStep(attack, 0, 10, 0)).toBe(1)
+	end)
+
+	it("continues inside the window and starts over outside it", function()
+		expect(Loadout.nextComboStep(attack, 1, 10, 10.5)).toBe(2)
+		expect(Loadout.nextComboStep(attack, 2, 10, 10.5)).toBe(3)
+		expect(Loadout.nextComboStep(attack, 1, 11, 10.5)).toBe(1)
+	end)
+
+	it("starts over after the finisher", function()
+		expect(Loadout.nextComboStep(attack, #attack.combo, 10, 99)).toBe(1)
+	end)
+
+	it("recovers longer from the finisher than from any other swing", function()
+		for weaponId, def in WeaponDefs do
+			local last = #def.attack.combo
+			local finisher = Loadout.swingTiming(def.attack, last)
+			expect({ weaponId, finisher.finisher }).toEqual({ weaponId, true })
+			for step = 1, last - 1 do
+				local timing = Loadout.swingTiming(def.attack, step)
+				expect({ weaponId, step, timing.finisher }).toEqual({ weaponId, step, false })
+				expect({ weaponId, step, finisher.readyAfter - finisher.windup > timing.readyAfter - timing.windup })
+					.toEqual({ weaponId, step, true })
+			end
+		end
+	end)
+
+	-- A combo you can never continue isn't a combo: the window has to stay
+	-- open past the moment the next swing is allowed.
+	it("keeps every combo window open past the swing cooldown", function()
+		for weaponId, def in WeaponDefs do
+			for step = 1, #def.attack.combo - 1 do
+				local timing = Loadout.swingTiming(def.attack, step)
+				expect({ weaponId, step, timing.comboExpiresAfter > timing.readyAfter }).toEqual({ weaponId, step, true })
+			end
+		end
+	end)
+
+	it("gives every weapon a combo that ends in its hardest hit", function()
+		for weaponId, def in WeaponDefs do
+			local combo = def.attack.combo
+			expect({ weaponId, #combo >= 2 }).toEqual({ weaponId, true })
+			for step = 1, #combo - 1 do
+				expect({ weaponId, combo[#combo].damageMultiplier > combo[step].damageMultiplier }).toEqual({ weaponId, true })
 			end
 		end
 	end)

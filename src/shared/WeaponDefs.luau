@@ -17,9 +17,10 @@
 -- another row.
 
 export type ParryProfile = {
-	-- Tolerances are measured from the moment of impact, not from the start of
-	-- the windup. Early is the wider half on purpose: players anticipate the
-	-- hit, so pressing slightly early is the common honest mistake.
+	-- Pressing block opens parry frames: a hit landing up to earlyTolerance
+	-- seconds after the press is parried. lateTolerance is the slack for a hit
+	-- landing a hair before the press, within a frame or two. See
+	-- ParryMath.catches.
 	earlyTolerance: number,
 	lateTolerance: number,
 }
@@ -42,10 +43,36 @@ export type ParryPayoff = {
 	riposteMultiplier: number,
 }
 
-export type AttackProfile = {
-	-- Player-side windup before a PvE swing lands. Long enough to be
-	-- committal, so attacking into a telegraph is a real decision.
+-- One swing of a combo.
+export type ComboStep = {
+	-- Seconds from the press to the hit landing.
 	windup: number,
+	-- Multiplies the weapon's (upgraded) damage.
+	damageMultiplier: number,
+}
+
+-- The heavy attack on its own key: slower, harder, wider, on a cooldown.
+export type CriticalProfile = {
+	windup: number,
+	damageMultiplier: number,
+	cooldown: number,
+	range: number,
+	arcDegrees: number,
+}
+
+export type AttackProfile = {
+	-- Pressing attack again soon after a swing lands continues into the next
+	-- step; the last step is the finisher, which hits hardest and takes
+	-- longest to recover from. Each step has its own animation.
+	combo: { ComboStep },
+	-- Seconds after a swing lands in which the next press continues the combo.
+	comboWindow: number,
+	-- Lock after the finisher (or a critical) lands.
+	finisherRecovery: number,
+	-- A short forward step (studs per second) on each swing. Visual feel; the
+	-- server resolves the hit from wherever the player actually is.
+	lunge: number,
+	critical: CriticalProfile,
 	-- How long this weapon's swing telegraphs to a duel opponent before it
 	-- resolves. Players have no EnemyDefs entry to read this from, so it lives
 	-- here. Tracks each class's parry identity: the Tank is slowest and easiest
@@ -55,8 +82,8 @@ export type AttackProfile = {
 	damage: number,
 	range: number,
 	arcDegrees: number,
+	-- Pause after a non-finisher swing lands before the next can start.
 	cooldown: number,
-	staminaCost: number,
 }
 
 export type WeaponDef = {
@@ -68,15 +95,15 @@ export type WeaponDef = {
 }
 
 local WeaponDefs: { [string]: WeaponDef } = {
-	-- Widest window in the game (ARCHITECTURE.md: Tank is "wide/forgiving").
-	-- Converts a parry into control rather than damage: the longer stagger is a
-	-- longer double-damage window for the whole group.
+	-- The longest parry frames in the game (ARCHITECTURE.md: Tank is
+	-- "wide/forgiving"). Converts a parry into control rather than damage: the
+	-- longer stagger is a longer double-damage window for the whole group.
 	SwordAndShield = {
 		displayName = "Sword & Shield",
 		classTag = "Tank",
 		parry = {
-			earlyTolerance = 0.20,
-			lateTolerance = 0.10,
+			earlyTolerance = 0.28,
+			lateTolerance = 0.08,
 		},
 		payoff = {
 			staggerMultiplier = 1.5,
@@ -85,26 +112,36 @@ local WeaponDefs: { [string]: WeaponDef } = {
 			riposteDuration = 0,
 			riposteMultiplier = 1,
 		},
+		-- Diagonal cut, rising cut, flat cut, then an overhead chop. The
+		-- critical is a spinning cleave.
 		attack = {
-			windup = 0.45,
+			combo = {
+				{ windup = 0.28, damageMultiplier = 1 },
+				{ windup = 0.26, damageMultiplier = 1 },
+				{ windup = 0.26, damageMultiplier = 1 },
+				{ windup = 0.36, damageMultiplier = 1.5 },
+			},
+			comboWindow = 0.6,
+			finisherRecovery = 0.55,
+			lunge = 9,
+			critical = { windup = 0.6, damageMultiplier = 2.6, cooldown = 6, range = 12, arcDegrees = 170 },
 			pvpTelegraph = 0.5,
 			damage = 12,
 			range = 11,
-			arcDegrees = 110,
-			cooldown = 0.9,
-			staminaCost = 12,
+			arcDegrees = 120,
+			cooldown = 0.1,
 		},
 	},
 
-	-- Tight window, high payoff (ARCHITECTURE.md: "tight parry window, high
-	-- backstab payoff"). The riposte is where that payoff lives until
-	-- positional backstabs exist.
+	-- The shortest parry frames, the biggest payoff (ARCHITECTURE.md: "tight
+	-- parry window, high backstab payoff"). The riposte is where that payoff
+	-- lives until positional backstabs exist.
 	Daggers = {
 		displayName = "Daggers",
 		classTag = "Assassin",
 		parry = {
-			earlyTolerance = 0.08,
-			lateTolerance = 0.05,
+			earlyTolerance = 0.2,
+			lateTolerance = 0.06,
 		},
 		payoff = {
 			staggerMultiplier = 0.8,
@@ -113,14 +150,24 @@ local WeaponDefs: { [string]: WeaponDef } = {
 			riposteDuration = 2.5,
 			riposteMultiplier = 2.5,
 		},
+		-- Right jab, left jab, cross cut, then a double downward stab. The
+		-- critical is a leaping X-slash.
 		attack = {
-			windup = 0.2,
+			combo = {
+				{ windup = 0.16, damageMultiplier = 1 },
+				{ windup = 0.15, damageMultiplier = 1 },
+				{ windup = 0.15, damageMultiplier = 1 },
+				{ windup = 0.22, damageMultiplier = 1.5 },
+			},
+			comboWindow = 0.45,
+			finisherRecovery = 0.45,
+			lunge = 11,
+			critical = { windup = 0.42, damageMultiplier = 2.2, cooldown = 5, range = 9, arcDegrees = 100 },
 			pvpTelegraph = 0.3,
 			damage = 6,
 			range = 8,
-			arcDegrees = 70,
-			cooldown = 0.4,
-			staminaCost = 7,
+			arcDegrees = 80,
+			cooldown = 0.06,
 		},
 	},
 
@@ -132,8 +179,8 @@ local WeaponDefs: { [string]: WeaponDef } = {
 		displayName = "Staff",
 		classTag = "Healer",
 		parry = {
-			earlyTolerance = 0.14,
-			lateTolerance = 0.08,
+			earlyTolerance = 0.24,
+			lateTolerance = 0.07,
 		},
 		payoff = {
 			staggerMultiplier = 1.0,
@@ -142,14 +189,24 @@ local WeaponDefs: { [string]: WeaponDef } = {
 			riposteDuration = 0,
 			riposteMultiplier = 1,
 		},
+		-- Sweep, return sweep, thrust, then a two-handed overhead slam. The
+		-- critical is a full spinning sweep that hits all around.
 		attack = {
-			windup = 0.35,
+			combo = {
+				{ windup = 0.25, damageMultiplier = 1 },
+				{ windup = 0.24, damageMultiplier = 1 },
+				{ windup = 0.24, damageMultiplier = 1 },
+				{ windup = 0.32, damageMultiplier = 1.45 },
+			},
+			comboWindow = 0.6,
+			finisherRecovery = 0.5,
+			lunge = 7,
+			critical = { windup = 0.55, damageMultiplier = 2.3, cooldown = 6, range = 13, arcDegrees = 360 },
 			pvpTelegraph = 0.45,
 			damage = 8,
 			range = 12,
-			arcDegrees = 90,
-			cooldown = 0.7,
-			staminaCost = 9,
+			arcDegrees = 110,
+			cooldown = 0.1,
 		},
 	},
 }

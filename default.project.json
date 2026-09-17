@@ -10,6 +10,47 @@
       }
     },
 
+    "Lighting": {
+      "$properties": {
+        "Technology": "Future",
+        "ClockTime": 18.4,
+        "Brightness": 1.4,
+        "Ambient": [0.2, 0.18, 0.24],
+        "OutdoorAmbient": [0.28, 0.26, 0.34],
+        "EnvironmentDiffuseScale": 0.5,
+        "EnvironmentSpecularScale": 0.7,
+        "GlobalShadows": true,
+        "ExposureCompensation": 0.15
+      },
+      "Atmosphere": {
+        "$className": "Atmosphere",
+        "$properties": {
+          "Density": 0.36,
+          "Offset": 0.12,
+          "Color": [0.45, 0.4, 0.5],
+          "Decay": [0.3, 0.22, 0.32],
+          "Glare": 0.2,
+          "Haze": 1.4
+        }
+      },
+      "Bloom": {
+        "$className": "BloomEffect",
+        "$properties": {
+          "Intensity": 0.7,
+          "Size": 28,
+          "Threshold": 1.4
+        }
+      },
+      "ColorGrade": {
+        "$className": "ColorCorrectionEffect",
+        "$properties": {
+          "Contrast": 0.12,
+          "Saturation": -0.05,
+          "TintColor": [1.0, 0.96, 0.92]
+        }
+      }
+    },
+
     "ReplicatedStorage": {
       "Shared": {
         "$path": "src/shared"

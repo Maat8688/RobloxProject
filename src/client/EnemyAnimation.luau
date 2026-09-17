@@ -48,16 +48,10 @@ local tracked: { [string]: Tracked } = {}
 -- finished arriving yet — a player joining mid-fight can hear about a death
 -- before they have the body to show it on.
 local aliveById: { [string]: boolean } = {}
+-- Last reported health, so a drop can be told apart from a respawn.
+local healthById: { [string]: number } = {}
 
-local function countJoints(model: Model): number
-	local count = 0
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("Motor6D") and descendant.Part1 then
-			count += 1
-		end
-	end
-	return count
-end
+local countJoints = RigAnimation.countJoints
 
 local function onEnemyAdded(instance: Instance)
 	if not instance:IsA("Model") then
@@ -145,6 +139,14 @@ local function step(deltaTime: number)
 	end
 end
 
+-- Freeze an enemy's pose for a moment as a blow lands. See RigAnimation.
+function EnemyAnimation.hitStop(enemyId: string, seconds: number)
+	local entry = tracked[enemyId]
+	if entry and not entry.dead then
+		RigAnimation.hitStop(entry.controller, seconds)
+	end
+end
+
 function EnemyAnimation.start()
 	CollectionService:GetInstanceAddedSignal(ENEMY_TAG):Connect(onEnemyAdded)
 	CollectionService:GetInstanceRemovedSignal(ENEMY_TAG):Connect(onEnemyRemoved)
@@ -169,20 +171,37 @@ function EnemyAnimation.start()
 
 	Remotes.get("EnemyStaggered").OnClientEvent:Connect(function(payload)
 		local entry = tracked[payload.enemyId]
-		if entry and not entry.dead then
+		if not entry or entry.dead then
+			return
+		end
+
+		-- A parry staggers; a player's hit only flinches.
+		if payload.kind == "flinch" then
+			RigAnimation.playAction(entry.controller, AnimationDefs.HURT)
+		else
 			RigAnimation.playAction(entry.controller, "stagger", { duration = payload.duration })
 		end
 	end)
 
 	Remotes.get("EnemyHealthChanged").OnClientEvent:Connect(function(payload)
 		aliveById[payload.enemyId] = payload.alive
+		local previousHealth = healthById[payload.enemyId]
+		healthById[payload.enemyId] = payload.health
 
 		local entry = tracked[payload.enemyId]
 		if not entry then
 			return
 		end
 
-		if not payload.alive and not entry.dead then
+		local tookDamage = previousHealth ~= nil and payload.health < previousHealth
+		if payload.alive and tookDamage and not entry.dead then
+			-- A flinch only when nothing more important is playing: an attack
+			-- must keep its timing, and a stagger or death says more than a
+			-- flinch would.
+			if RigAnimation.currentAction(entry.controller) == nil then
+				RigAnimation.playAction(entry.controller, AnimationDefs.HURT)
+			end
+		elseif not payload.alive and not entry.dead then
 			entry.dead = true
 			RigAnimation.playAction(entry.controller, "death", { hold = true })
 		elseif payload.alive and entry.dead then

@@ -166,106 +166,61 @@ describe("ParryMath.evaluate timestamp authority", function()
 	end)
 end)
 
-describe("ParryMath.selectParryTarget", function()
-	it("returns nil when nothing is incoming", function()
-		expect(ParryMath.selectParryTarget({}, NOW)).toBeNil()
+describe("ParryMath.catches", function()
+	local profile = { earlyTolerance = 0.25, lateTolerance = 0.05 }
+
+	it("catches a hit landing inside the frames a press opened", function()
+		expect(ParryMath.catches(10, profile, 10.1)).toBe(true)
+		expect(ParryMath.catches(10, profile, 10)).toBe(true)
 	end)
 
-	it("picks the attack landing nearest the press", function()
-		local target = ParryMath.selectParryTarget({
-			{ enemyId = "Shambler_2", impactTime = NOW + 0.8, parryable = true },
-			{ enemyId = "Spitter_3", impactTime = NOW + 0.05, parryable = true },
-			{ enemyId = "TrainingDummy_1", impactTime = NOW + 1.4, parryable = true },
-		}, NOW)
-
-		expect((target :: any).enemyId).toBe("Spitter_3")
+	it("treats both ends as inclusive", function()
+		expect(ParryMath.catches(10, profile, 10.25)).toBe(true)
+		expect(ParryMath.catches(10, profile, 9.95)).toBe(true)
 	end)
 
-	it("counts an attack that has just passed as nearer than a distant one", function()
-		local target = ParryMath.selectParryTarget({
-			{ enemyId = "Shambler_2", impactTime = NOW - 0.02, parryable = true },
-			{ enemyId = "Spitter_3", impactTime = NOW + 0.9, parryable = true },
-		}, NOW)
-
-		expect((target :: any).enemyId).toBe("Shambler_2")
+	it("misses a hit landing after the frames closed", function()
+		expect(ParryMath.catches(10, profile, 10.3)).toBe(false)
 	end)
 
-	-- Deliberate: if the thing about to hit you is unparryable, the parry must
-	-- fail against it rather than quietly redirecting to a parryable attack
-	-- elsewhere. Otherwise reading which attack lands first stops mattering.
-	it("does not skip an unparryable attack in favour of a parryable one", function()
-		local target = ParryMath.selectParryTarget({
-			{ enemyId = "Spitter_3", impactTime = NOW + 0.05, parryable = false },
-			{ enemyId = "Shambler_2", impactTime = NOW + 0.3, parryable = true },
-		}, NOW)
-
-		expect((target :: any).enemyId).toBe("Spitter_3")
-	end)
-
-	-- With several rooms running, the nearest-impact attack may be aimed at
-	-- someone else entirely.
-	it("ignores an attack that can't reach the player, however soon it lands", function()
-		local target = ParryMath.selectParryTarget({
-			{ enemyId = "FarRoom_9", impactTime = NOW, parryable = true, distance = 60, reach = 12 },
-			{ enemyId = "Shambler_2", impactTime = NOW + 0.4, parryable = true, distance = 5, reach = 13 },
-		}, NOW)
-
-		expect((target :: any).enemyId).toBe("Shambler_2")
-	end)
-
-	it("returns nil when every attack is out of reach", function()
-		local target = ParryMath.selectParryTarget({
-			{ enemyId = "FarRoom_9", impactTime = NOW, parryable = true, distance = 60, reach = 12 },
-		}, NOW)
-
-		expect(target).toBeNil()
-	end)
-
-	it("includes an attack exactly at the edge of its reach", function()
-		local target = ParryMath.selectParryTarget({
-			{ enemyId = "Edge_1", impactTime = NOW, parryable = true, distance = 12, reach = 12 },
-		}, NOW)
-
-		expect((target :: any).enemyId).toBe("Edge_1")
+	-- Pressing after being hit is not a parry, beyond a frame's slack.
+	it("misses a hit that landed before the press", function()
+		expect(ParryMath.catches(10, profile, 9.9)).toBe(false)
 	end)
 end)
 
-describe("ParryMath.checkReadiness", function()
-	it("allows a parry with full stamina and no lockout", function()
-		expect(ParryMath.checkReadiness(CombatConstants.MAX_STAMINA, 0, NOW).allowed).toBe(true)
+describe("ParryMath.pressOpensFrames", function()
+	local profile = { earlyTolerance = 0.25, lateTolerance = 0.05 }
+	local cooldownEnds = 10 + 0.25 + CombatConstants.PARRY_COOLDOWN
+
+	it("opens frames on a first press", function()
+		expect(ParryMath.pressOpensFrames(nil, false, profile, 10)).toBe(true)
 	end)
 
-	it("blocks while the whiff lockout is active", function()
-		local readiness = ParryMath.checkReadiness(CombatConstants.MAX_STAMINA, NOW + 0.1, NOW)
-		expect(readiness.allowed).toBe(false)
-		expect(readiness.reason).toBe("recovering")
+	it("opens frames again straight after a press that caught something", function()
+		expect(ParryMath.pressOpensFrames(10, true, profile, 10.3)).toBe(true)
 	end)
 
-	it("allows again once the lockout has elapsed", function()
-		expect(ParryMath.checkReadiness(CombatConstants.MAX_STAMINA, NOW - 0.1, NOW).allowed).toBe(true)
-	end)
-
-	it("blocks when stamina is below the parry cost", function()
-		local readiness = ParryMath.checkReadiness(CombatConstants.PARRY_STAMINA_COST - 1, 0, NOW)
-		expect(readiness.allowed).toBe(false)
-		expect(readiness.reason).toBe("exhausted")
-	end)
-
-	it("allows when stamina exactly covers the parry cost", function()
-		expect(ParryMath.checkReadiness(CombatConstants.PARRY_STAMINA_COST, 0, NOW).allowed).toBe(true)
+	-- The anti-mash rule: a miss puts parrying on cooldown; pressing again only blocks.
+	it("refuses frames after a miss until the cooldown ends", function()
+		expect(ParryMath.pressOpensFrames(10, false, profile, cooldownEnds - 0.01)).toBe(false)
+		expect(ParryMath.pressOpensFrames(10, false, profile, cooldownEnds)).toBe(true)
 	end)
 end)
 
-describe("ParryMath.regenerateStamina", function()
-	it("regenerates at the configured rate", function()
-		expect(ParryMath.regenerateStamina(0, 1)).toBe(CombatConstants.STAMINA_REGEN_PER_SECOND)
+describe("ParryMath.withinWindow", function()
+	it("covers the window and nothing outside it", function()
+		expect(ParryMath.withinWindow(5, 0.3, 5)).toBe(true)
+		expect(ParryMath.withinWindow(5, 0.3, 5.3)).toBe(true)
+		expect(ParryMath.withinWindow(5, 0.3, 5.31)).toBe(false)
+		expect(ParryMath.withinWindow(5, 0.3, 4.9)).toBe(false)
+		expect(ParryMath.withinWindow(nil, 0.3, 5)).toBe(false)
 	end)
+end)
 
-	it("clamps at the maximum", function()
-		expect(ParryMath.regenerateStamina(CombatConstants.MAX_STAMINA, 10)).toBe(CombatConstants.MAX_STAMINA)
-	end)
-
-	it("does not change with a zero timestep", function()
-		expect(ParryMath.regenerateStamina(42, 0)).toBe(42)
+describe("ParryMath.validateTimestamp", function()
+	it("accepts an honest press and rejects an impossible one", function()
+		expect(ParryMath.validateTimestamp(100, 100, 0)).toBeNil()
+		expect(ParryMath.validateTimestamp(101, 100, 0)).toBe("rejected_future")
 	end)
 end)

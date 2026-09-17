@@ -9,30 +9,35 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local CombatServer = require(script.Combat.CombatServer)
 local DataService = require(script.DataService)
-local DungeonGenerator = require(script.Dungeon.DungeonGenerator)
+local DungeonService = require(script.Dungeon.DungeonService)
 local BlacksmithService = require(script.Economy.BlacksmithService)
 local ArenaService = require(script.PvP.ArenaService)
 local SpawnService = require(script.SpawnService)
 local WeaponPickups = require(script.WeaponPickups)
+local WeaponVisuals = require(script.WeaponVisuals)
 
 -- Remotes must exist before any client starts waiting on them.
 Remotes.init()
 
+-- Before any profile loads, so a saved weapon is drawn in hand from the start.
+WeaponVisuals.start()
+
 -- Combat has to be running before the dungeon spawns enemies into it.
 CombatServer.start()
 
-local dungeon = DungeonGenerator.generate()
+-- The start room sits at the origin; every dungeon grows north from its door.
+local startCFrame = DungeonService.start(CFrame.new())
 
-WeaponPickups.start(dungeon.startCFrame)
-BlacksmithService.start(dungeon.startCFrame)
-ArenaService.start(dungeon.startCFrame)
+WeaponPickups.start(startCFrame)
+BlacksmithService.start(startCFrame)
+ArenaService.start(startCFrame)
 
--- Players start in the safe start room, facing down the dungeon, with the
--- weapon stands in front of them. There's no SpawnLocation; SpawnService
+-- Players start in the safe start room, facing the door to the dungeon, with
+-- the weapon stands in front of them. There's no SpawnLocation; SpawnService
 -- places every character here.
 SpawnService.start(CFrame.lookAt(
-	dungeon.startCFrame.Position + Vector3.new(0, 4, 0),
-	dungeon.startCFrame.Position + Vector3.new(0, 4, 20)
+	startCFrame.Position + Vector3.new(0, 4, 0),
+	startCFrame.Position + Vector3.new(0, 4, 20)
 ))
 
 -- Last, so everything a loaded player can touch already exists. DataService

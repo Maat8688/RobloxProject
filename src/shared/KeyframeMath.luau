@@ -32,10 +32,10 @@ export type PoseSpec = {
 }
 
 -- How a keyframe moves to the next one. "Smooth" is cubic in-out, "Hold"
--- stays put until the next keyframe. In-out easing is symmetric on purpose:
--- Roblox's legacy pose easing swaps In and Out, and a symmetric curve reads
--- the same either way.
-export type Easing = "Linear" | "Smooth" | "Hold"
+-- stays put until the next keyframe. "In" starts slow and accelerates (a blade
+-- building into its hit); "Out" starts fast and settles (a follow-through, or
+-- a body snapping into its windup). Cubic throughout.
+export type Easing = "Linear" | "Smooth" | "Hold" | "In" | "Out"
 
 export type Keyframe = {
 	time: number,
@@ -84,6 +84,11 @@ function KeyframeMath.ease(easing: Easing?, alpha: number): number
 		return a
 	elseif easing == "Hold" then
 		return if a >= 1 then 1 else 0
+	elseif easing == "In" then
+		return a * a * a
+	elseif easing == "Out" then
+		local f = 1 - a
+		return 1 - f * f * f
 	end
 
 	-- Smooth (the default): cubic in-out.

@@ -79,6 +79,18 @@ function SpawnService.start(cframe: CFrame)
 	end
 end
 
+-- Moves a living character back to the start room, a little apart from
+-- anyone else sent there at the same moment.
+function SpawnService.sendToStart(player: Player)
+	local character = player.Character
+	if not character or not character:FindFirstChild("HumanoidRootPart") then
+		return
+	end
+
+	local spread = CFrame.new((math.random() - 0.5) * 8, 0, (math.random() - 0.5) * 4)
+	character:PivotTo(spawnCFrame * spread)
+end
+
 -- Called once a player's profile is ready: gives them their first body, and
 -- from then on respawns them after each death.
 function SpawnService.spawn(player: Player)

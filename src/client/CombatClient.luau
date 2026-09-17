@@ -1,14 +1,27 @@
 --!strict
--- Combat input capture. The client stamps when the player pressed parry and
--- sends it, and asks to swing — it decides none of the outcomes. The same
--- inputs drive PvE and duels; the server routes them.
+-- Combat input. Sends presses to the server, which decides every outcome, and
+-- plays the local player's side at once so the controls feel instant: the
+-- animation, the lunge or dash, and the slowdowns while attacking, blocking
+-- or stunned.
+--
+--   Left click / R2   attack (keep pressing for the combo)
+--   R / R1            critical
+--   Right click / X   feint (early in a swing)
+--   F / L1            press to parry, hold to block
+--   Q / B             dodge
+--
+-- The client mirrors the server's rules (combo steps, cooldowns, stuns) only to
+-- decide what to animate. If the two disagree, the server's call stands and
+-- the worst case is an animation that didn't land.
 
 local ContextActionService = game:GetService("ContextActionService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage.Shared
+local CombatConstants = require(Shared.CombatConstants)
 local Loadout = require(Shared.Loadout)
 local Remotes = require(Shared.Remotes)
 
@@ -16,10 +29,7 @@ local PlayerAnimation = require(script.Parent.PlayerAnimation)
 
 local CombatClient = {}
 
-local PARRY_ACTION = "Parry"
-local ATTACK_ACTION = "Attack"
-
--- Number-key weapon swapping, for comparing parry windows back to back while
+-- Number-key weapon swapping, for comparing weapons back to back while
 -- tuning. Studio only, on both ends: in a live game the weapon stands are the
 -- way to equip, and the server ignores this remote outside Studio anyway.
 local SWAP_KEYS = {
@@ -28,64 +38,368 @@ local SWAP_KEYS = {
 	Enum.KeyCode.Three,
 }
 
+-- A swing steps forward for this long.
+local LUNGE_DURATION = 0.12
+-- Walking stays slowed for this long past a swing's hit.
+local ATTACK_SLOW_AFTER = 0.2
+
+local localPlayer = Players.LocalPlayer
+
+-- Everything below is in server time (Workspace:GetServerTimeNow()), so values
+-- the server sends can be compared directly.
+local weaponId: string? = nil
+local dueling = false
+local guarding = false
+local stunnedUntil = 0
+local attackReadyAt = 0
+local attackSlowUntil = 0
+local comboStep = 0
+local comboExpiresAt = 0
+local swingStartedAt = 0
+local swingWindup = 0
+local swingEndsAt = 0
+local criticalReadyAt = 0
+local feintReadyAt = 0
+local dodgeReadyAt = 0
+
+local baseWalkSpeed = 16
+
+local function now(): number
+	return Workspace:GetServerTimeNow()
+end
+
+local function character(): (Humanoid?, BasePart?)
+	local model = localPlayer.Character
+	if not model then
+		return nil, nil
+	end
+	return model:FindFirstChildOfClass("Humanoid"), model:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+local function stunned(): boolean
+	return now() < stunnedUntil
+end
+
+local function swinging(): boolean
+	return now() < swingEndsAt
+end
+
+local function flat(vector: Vector3): Vector3?
+	local horizontal = Vector3.new(vector.X, 0, vector.Z)
+	if horizontal.Magnitude < 1e-3 then
+		return nil
+	end
+	return horizontal.Unit
+end
+
+-- Drives the character along the ground at `speed` for `duration`. A velocity
+-- constraint rather than an impulse, because a walking Humanoid cancels an
+-- impulse almost immediately. Falls back to an impulse if the constraint
+-- can't be made.
+local function push(root: BasePart, direction: Vector3, speed: number, duration: number)
+	local ok = pcall(function()
+		local attachment = Instance.new("Attachment")
+		attachment.Name = "CombatPush"
+		attachment.Parent = root
+
+		local velocity = Instance.new("LinearVelocity")
+		velocity.Attachment0 = attachment
+		velocity.RelativeTo = Enum.ActuatorRelativeTo.World
+		velocity.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+		velocity.MaxAxesForce = Vector3.new(1e5, 0, 1e5)
+		velocity.VectorVelocity = direction * speed
+		velocity.Parent = attachment
+
+		task.delay(duration, function()
+			attachment:Destroy()
+		end)
+	end)
+
+	if not ok then
+		root:ApplyImpulse(direction * speed * root.AssemblyMass)
+	end
+end
+
+local function cancelPredictedSwing()
+	swingEndsAt = 0
+	comboStep = 0
+end
+
+--[[ Attacking ]]
+
+local function canAttack(): boolean
+	return weaponId ~= nil and not stunned() and not guarding and not swinging() and now() >= attackReadyAt
+end
+
+local function beginSwing(windup: number)
+	local t = now()
+	swingStartedAt = t
+	swingWindup = windup
+	swingEndsAt = t + windup
+	attackSlowUntil = t + windup + ATTACK_SLOW_AFTER
+end
+
+local function lunge(speed: number)
+	local _, root = character()
+	local look = root and flat(root.CFrame.LookVector)
+	if root and look then
+		push(root, look, speed, LUNGE_DURATION)
+	end
+end
+
+local function attack()
+	if not canAttack() then
+		return
+	end
+
+	local id = weaponId :: string
+	local profile = Loadout.getDef(id).attack
+	local t = now()
+
+	if dueling then
+		beginSwing(profile.pvpTelegraph)
+		attackReadyAt = t + profile.pvpTelegraph + profile.cooldown
+		PlayerAnimation.playLocal("swing", id, profile.pvpTelegraph, 1)
+	else
+		local step = Loadout.nextComboStep(profile, comboStep, t, comboExpiresAt)
+		local timing = Loadout.swingTiming(profile, step)
+		comboStep = step
+		comboExpiresAt = t + timing.comboExpiresAfter
+		attackReadyAt = t + timing.readyAfter
+		beginSwing(timing.windup)
+		PlayerAnimation.playLocal("swing", id, timing.windup, step)
+	end
+
+	Remotes.get("AttackRequest"):FireServer()
+	lunge(profile.lunge)
+end
+
+local function critical()
+	if dueling or not canAttack() or now() < criticalReadyAt then
+		return
+	end
+
+	local id = weaponId :: string
+	local profile = Loadout.getDef(id).attack
+	local t = now()
+
+	criticalReadyAt = t + profile.critical.cooldown
+	attackReadyAt = t + profile.critical.windup + profile.finisherRecovery
+	comboStep = 0
+	beginSwing(profile.critical.windup)
+
+	PlayerAnimation.playLocal("critical", id, profile.critical.windup)
+	Remotes.get("CriticalRequest"):FireServer()
+	lunge(profile.lunge * 1.4)
+end
+
+-- Only claims the input while a swing can still be feinted, so right-drag
+-- camera control keeps working the rest of the time.
+local function feint(): boolean
+	local t = now()
+	local cancellable = swinging() and t - swingStartedAt <= swingWindup * CombatConstants.CANCEL_WINDOW_FRACTION
+	if not weaponId or not cancellable or t < feintReadyAt then
+		return false
+	end
+
+	feintReadyAt = t + CombatConstants.FEINT_COOLDOWN
+	attackReadyAt = t
+	cancelPredictedSwing()
+
+	PlayerAnimation.playLocal("feint", weaponId :: string)
+	Remotes.get("FeintRequest"):FireServer()
+	return true
+end
+
+--[[ Defending ]]
+
+local function raiseGuard()
+	if not weaponId or stunned() then
+		return
+	end
+
+	-- The press is timestamped: whatever lands inside its parry frames is
+	-- parried. GetServerTimeNow is synchronised to the server clock, so the
+	-- server can check the claim directly.
+	Remotes.get("ParryAttempt"):FireServer({ timestamp = now() })
+	guarding = true
+	PlayerAnimation.playLocal("parry", weaponId :: string)
+end
+
+local function lowerGuard()
+	if not guarding then
+		return
+	end
+	guarding = false
+	Remotes.get("GuardReleased"):FireServer()
+	PlayerAnimation.playLocal("guard_end", weaponId or "")
+end
+
+local function dodge()
+	local t = now()
+	if not weaponId or stunned() or t < dodgeReadyAt then
+		return
+	end
+
+	-- A swing can only be dodge-cancelled early in its windup.
+	if swinging() then
+		if t - swingStartedAt > swingWindup * CombatConstants.CANCEL_WINDOW_FRACTION then
+			return
+		end
+		cancelPredictedSwing()
+		attackReadyAt = t
+	end
+
+	local humanoid, root = character()
+	if not humanoid or not root then
+		return
+	end
+
+	dodgeReadyAt = t + CombatConstants.DODGE_COOLDOWN
+	guarding = false
+
+	-- Whichever way the player is moving; straight back if standing still.
+	local direction = flat(humanoid.MoveDirection) or flat(-root.CFrame.LookVector)
+	if direction then
+		push(root, direction, CombatConstants.DODGE_SPEED, CombatConstants.DODGE_DURATION)
+	end
+
+	Remotes.get("DodgeRequest"):FireServer({ timestamp = t })
+	PlayerAnimation.playLocal("dodge", weaponId :: string)
+end
+
+--[[ Setup ]]
+
 local function bindDebugSwaps()
 	local equipWeapon = Remotes.get("EquipWeapon")
 	local weaponIds = Loadout.allWeaponIds()
 
 	for index, keyCode in SWAP_KEYS do
-		local weaponId = weaponIds[index]
-		if not weaponId then
+		local id = weaponIds[index]
+		if not id then
 			break
 		end
 
-		ContextActionService:BindAction(`Equip_{weaponId}`, function(_, inputState)
+		ContextActionService:BindAction(`Equip_{id}`, function(_, inputState)
 			if inputState == Enum.UserInputState.Begin then
-				equipWeapon:FireServer({ weaponId = weaponId })
+				equipWeapon:FireServer({ weaponId = id })
 			end
 			return Enum.ContextActionResult.Sink
 		end, false, keyCode)
 	end
 end
 
+-- Binds a press-only action.
+local function bindPress(name: string, title: string, touchButton: boolean, callback: () -> (), ...: Enum.KeyCode | Enum.UserInputType)
+	ContextActionService:BindAction(name, function(_, inputState)
+		if inputState ~= Enum.UserInputState.Begin then
+			return Enum.ContextActionResult.Pass
+		end
+		callback()
+		return Enum.ContextActionResult.Sink
+	end, touchButton, ...)
+	if touchButton then
+		ContextActionService:SetTitle(name, title)
+	end
+end
+
 function CombatClient.start()
-	local parryAttempt = Remotes.get("ParryAttempt")
-	local attackRequest = Remotes.get("AttackRequest")
+	bindPress("Attack", "Attack", true, attack, Enum.UserInputType.MouseButton1, Enum.KeyCode.ButtonR2)
+	bindPress("Critical", "Critical", true, critical, Enum.KeyCode.R, Enum.KeyCode.ButtonR1)
+	bindPress("Dodge", "Dodge", true, dodge, Enum.KeyCode.Q, Enum.KeyCode.ButtonB)
 
-	ContextActionService:BindAction(PARRY_ACTION, function(_, inputState)
-		if inputState ~= Enum.UserInputState.Begin then
-			return Enum.ContextActionResult.Pass
+	ContextActionService:BindAction("Feint", function(_, inputState)
+		if inputState == Enum.UserInputState.Begin and feint() then
+			return Enum.ContextActionResult.Sink
 		end
+		return Enum.ContextActionResult.Pass
+	end, false, Enum.UserInputType.MouseButton2, Enum.KeyCode.ButtonX)
 
-		-- GetServerTimeNow is already synchronised to the server clock, so the
-		-- server can compare this directly against its own clock — and against
-		-- its own estimate of when this could have been sent.
-		parryAttempt:FireServer({ timestamp = Workspace:GetServerTimeNow() })
-		-- Animated now rather than after a round trip; see PlayerAnimation.
-		PlayerAnimation.predictParry()
-
-		return Enum.ContextActionResult.Sink
+	-- Press to parry, hold to block.
+	ContextActionService:BindAction("Block", function(_, inputState)
+		if inputState == Enum.UserInputState.Begin then
+			raiseGuard()
+			return Enum.ContextActionResult.Sink
+		elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+			lowerGuard()
+			return Enum.ContextActionResult.Sink
+		end
+		return Enum.ContextActionResult.Pass
 	end, true, Enum.KeyCode.F, Enum.KeyCode.ButtonL1)
-
-	ContextActionService:SetTitle(PARRY_ACTION, "Parry")
-
-	ContextActionService:BindAction(ATTACK_ACTION, function(_, inputState)
-		if inputState ~= Enum.UserInputState.Begin then
-			return Enum.ContextActionResult.Pass
-		end
-
-		-- No timestamp: a swing is not reactive, so the server has no reason to
-		-- trust client timing for it and simply resolves on its own clock.
-		attackRequest:FireServer()
-		PlayerAnimation.predictSwing()
-
-		return Enum.ContextActionResult.Sink
-	end, true, Enum.UserInputType.MouseButton1, Enum.KeyCode.ButtonR2)
-
-	ContextActionService:SetTitle(ATTACK_ACTION, "Attack")
+	ContextActionService:SetTitle("Block", "Block")
 
 	if RunService:IsStudio() then
 		bindDebugSwaps()
 	end
+
+	Remotes.get("WeaponEquipped").OnClientEvent:Connect(function(payload)
+		if payload.weaponId ~= weaponId then
+			comboStep = 0
+		end
+		weaponId = payload.weaponId
+	end)
+
+	Remotes.get("PvPStatusChanged").OnClientEvent:Connect(function(payload)
+		dueling = payload.status == "dueling"
+	end)
+
+	-- The server's word on stun and cooldowns replaces the predictions.
+	Remotes.get("CombatStateChanged").OnClientEvent:Connect(function(payload)
+		stunnedUntil = payload.stunnedUntil
+		dodgeReadyAt = payload.dodgeReadyAt
+		criticalReadyAt = payload.criticalReadyAt
+	end)
+
+	Remotes.get("PlayerHit").OnClientEvent:Connect(function(payload)
+		if payload.bleed or payload.dodged or payload.blocked then
+			return
+		end
+
+		local t = now()
+		if payload.guardBroken then
+			guarding = false
+			stunnedUntil = math.max(stunnedUntil, t + CombatConstants.GUARD_BREAK_STUN)
+			cancelPredictedSwing()
+			PlayerAnimation.playLocalGuardBreak()
+		elseif payload.amount > 0 then
+			stunnedUntil = math.max(stunnedUntil, t + CombatConstants.PLAYER_HIT_STUN)
+			cancelPredictedSwing()
+			PlayerAnimation.playLocalHurt()
+		end
+	end)
+
+	localPlayer.CharacterAdded:Connect(function(newCharacter)
+		guarding = false
+		stunnedUntil = 0
+		cancelPredictedSwing()
+		local humanoid = newCharacter:WaitForChild("Humanoid", 10) :: Humanoid?
+		if humanoid then
+			baseWalkSpeed = humanoid.WalkSpeed
+		end
+	end)
+	local humanoid = character()
+	if humanoid then
+		baseWalkSpeed = humanoid.WalkSpeed
+	end
+
+	-- Walking slows while attacking, blocking or stunned.
+	RunService.RenderStepped:Connect(function()
+		local current = character()
+		if not current then
+			return
+		end
+
+		local t = now()
+		local fraction = 1
+		if t < stunnedUntil then
+			fraction = CombatConstants.STUN_WALK_FRACTION
+		elseif t < attackSlowUntil then
+			fraction = CombatConstants.ATTACK_WALK_FRACTION
+		elseif guarding then
+			fraction = CombatConstants.BLOCK_WALK_FRACTION
+		end
+		current.WalkSpeed = baseWalkSpeed * fraction
+	end)
 end
 
 return CombatClient

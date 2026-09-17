@@ -4,6 +4,7 @@
 -- stay testable outside the engine.
 
 local CombatConstants = require(script.Parent.CombatConstants)
+local PostureMath = require(script.Parent.PostureMath)
 
 local DamageMath = {}
 
@@ -21,6 +22,33 @@ function DamageMath.resolveIncoming(baseDamage: number, wasParried: boolean): nu
 	end
 
 	return baseDamage
+end
+
+export type BlockOutcome = "unguarded" | "blocked" | "broken"
+
+export type BlockResult = {
+	outcome: BlockOutcome,
+	-- Health damage that lands.
+	damage: number,
+	-- The defender's posture afterwards.
+	posture: number,
+}
+
+-- An incoming hit against a player who may be guarding. `facing` is whether
+-- the attacker is inside the guard's arc. A guard only stops parryable
+-- attacks from the front. A blocked hit costs no health but fills posture; one
+-- that fills it breaks the guard and lands in full.
+function DamageMath.resolveBlock(damage: number, guarding: boolean, parryable: boolean, facing: boolean, posture: number): BlockResult
+	if not guarding or not parryable or not facing or damage <= 0 then
+		return { outcome = "unguarded", damage = damage, posture = posture }
+	end
+
+	local block = PostureMath.block(posture, damage)
+	if block.broken then
+		return { outcome = "broken", damage = damage, posture = block.posture }
+	end
+
+	return { outcome = "blocked", damage = 0, posture = block.posture }
 end
 
 export type OutgoingContext = {
@@ -96,6 +124,12 @@ local function angleToTarget(attackerPos: Vec2, attackerFacing: Vec2, targetPos:
 	dot = math.clamp(dot, -1, 1)
 
 	return math.deg(math.acos(dot))
+end
+
+-- Whether `targetPos` lies within `arcDegrees` (total, centred on `facing`) of
+-- where someone at `position` is facing, at any distance. For guards.
+function DamageMath.isFacing(position: Vec2, facing: Vec2, targetPos: Vec2, arcDegrees: number): boolean
+	return angleToTarget(position, facing, targetPos) <= arcDegrees / 2 + 1e-9
 end
 
 export type HitTestParams = {

@@ -6,15 +6,22 @@ dungeon, clear the enemy guarding each chest, and spend coins and crystals at th
 blacksmith to upgrade what you carry. A 1v1 duel arena runs on the same combat rules.
 
 **Status:** all ten build-order steps are code-complete, including saved progress.
-Enemies are Part-built R15 rigs with first-draft animations, ready to be refined;
-there's no sound yet, and nothing has had a tuning pass. See [`DESIGN.md`](DESIGN.md).
+Dungeons are randomised runs ending in a boss fight.
+Enemies are Part-built R15 rigs with first-draft animations, ready to be refined.
+A game-feel pass added weapons in hand, hit-stop, screen shake, sound, torch-lit
+rooms and dusk lighting, all from built-in or public-domain assets. Nothing has had
+a tuning pass yet. See [`DESIGN.md`](DESIGN.md).
 
 ## Controls
 
 | Input | Action |
 |---|---|
-| **F** / L1 | Parry |
-| **Left click** / R2 | Attack |
+| **Left click** / R2 | Attack; keep clicking for a 4-hit combo |
+| **R** / R1 | Critical: a heavy attack on a cooldown |
+| **Right click** / X | Feint: cancel a swing early in its windup |
+| **F** / L1 | Press just before a hit lands to parry; hold to block |
+| **Q** / B | Dodge: a quick dash you can't be hit during |
+| **F2** | Combat debug readout — **Studio only** |
 | **Left Shift** | Toggle camera lock |
 | **I** | Inventory |
 | **E** at a stand, anvil or chest | Equip a weapon, upgrade it, open a chest |
@@ -110,6 +117,33 @@ as-is; nothing needs uploading. To refine one in Roblox's Animation Editor:
 The workbench script checks its output before reporting success, including solving
 every animation against the floor. Regenerating replaces the file, so publish (or keep
 your own copy of) anything in progress first.
+
+## Dungeons
+
+Every server generates a random dungeon north of the start room. Each has a winding
+main path through fights, one elite hall and one ambush, then a shrine that
+heals you to full, then the throne room of **The Hollow King**. Treasure vaults branch
+off to the sides. Rooms stay cleared. Kill the boss and everyone in the dungeon is
+paid; 15 seconds later you're back in the start room and a new dungeon has formed.
+
+The rules (room sizes, how many of each room, enemy pools, ambush waves, rewards) are
+data in [`src/shared/DungeonDefs.luau`](src/shared/DungeonDefs.luau). The generator
+is [`src/shared/DungeonLayout.luau`](src/shared/DungeonLayout.luau), and
+`lune run test DungeonLayout` checks its rules across 300 generated dungeons.
+
+## Sounds
+
+Every sound is named in [`src/shared/SoundDefs.luau`](src/shared/SoundDefs.luau) with
+its asset id, volume and pitch range. The current ones are placeholders: Roblox's own
+public-domain classic sounds. To replace one, find a clip in Studio's **Toolbox → Audio**
+(anything published by the Roblox account is free to use), copy its id, and paste it
+over the old one as `rbxassetid://<id>`. The sound changes everywhere it plays.
+
+## Lighting
+
+The dusk sky, fog, bloom and colour grade are set in `default.project.json` under
+`Lighting`, so Rojo applies them. If Studio still looks flat after connecting, check
+**Lighting → Technology** is **Future**.
 
 ## Layout
 

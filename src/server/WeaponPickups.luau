@@ -6,7 +6,8 @@
 --
 -- ProximityPrompt.Triggered fires on the server with the player already
 -- attached, so equipping needs no RemoteEvent and adds no client-callable
--- path. No weapon-in-hand model yet; visuals are step 10.
+-- path. Each stand shows the weapon it gives (WeaponVisuals), lit in its
+-- class's colour, so the choice reads from across the room.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -14,34 +15,80 @@ local Workspace = game:GetService("Workspace")
 local Loadout = require(ReplicatedStorage.Shared.Loadout)
 
 local EquipService = require(script.Parent.EquipService)
+local WeaponVisuals = require(script.Parent.WeaponVisuals)
 
 local WeaponPickups = {}
 
-local STANDS = {
-	{ weaponId = "SwordAndShield", color = Color3.fromRGB(99, 95, 98), offset = Vector3.new(-6, 2, 5) },
-	{ weaponId = "Daggers", color = Color3.fromRGB(27, 42, 53), offset = Vector3.new(0, 2, 5) },
-	{ weaponId = "Staff", color = Color3.fromRGB(242, 243, 243), offset = Vector3.new(6, 2, 5) },
+local PEDESTAL_SIZE = Vector3.new(2.4, 3, 2.4)
+
+type Stand = {
+	weaponId: string,
+	accent: Color3,
+	-- The pedestal's centre, from the start room's origin.
+	offset: Vector3,
+	-- How the weapon is posed above the pedestal: degrees about X (90 stands a
+	-- forward-pointing blade upright), and how high its grip floats.
+	tilt: number,
+	height: number,
 }
+
+local STANDS: { Stand } = {
+	{ weaponId = "SwordAndShield", accent = Color3.fromRGB(120, 190, 255), offset = Vector3.new(-6, 1.5, 5), tilt = 90, height = 1.0 },
+	{ weaponId = "Daggers", accent = Color3.fromRGB(200, 110, 255), offset = Vector3.new(0, 1.5, 5), tilt = 90, height = 1.2 },
+	{ weaponId = "Staff", accent = Color3.fromRGB(110, 255, 170), offset = Vector3.new(6, 1.5, 5), tilt = 0, height = 2.6 },
+}
+
+local function makePedestal(stand: Stand, originCFrame: CFrame): Part
+	local pedestal = Instance.new("Part")
+	pedestal.Name = `{stand.weaponId}Pickup`
+	pedestal.Size = PEDESTAL_SIZE
+	pedestal.Anchored = true
+	pedestal.CanCollide = true
+	pedestal.Material = Enum.Material.Slate
+	pedestal.Color = Color3.fromRGB(70, 66, 72)
+	pedestal.CFrame = originCFrame * CFrame.new(stand.offset)
+	pedestal.Parent = Workspace
+
+	-- A glowing inlay on top, in the class's colour.
+	local inlay = Instance.new("Part")
+	inlay.Name = "Inlay"
+	inlay.Size = Vector3.new(PEDESTAL_SIZE.X - 0.5, 0.1, PEDESTAL_SIZE.Z - 0.5)
+	inlay.Anchored = true
+	inlay.CanCollide = false
+	inlay.CanQuery = false
+	inlay.Material = Enum.Material.Neon
+	inlay.Color = stand.accent
+	inlay.CFrame = pedestal.CFrame * CFrame.new(0, PEDESTAL_SIZE.Y / 2 + 0.05, 0)
+	inlay.Parent = pedestal
+
+	local light = Instance.new("PointLight")
+	light.Color = stand.accent
+	light.Brightness = 1.5
+	light.Range = 10
+	light.Parent = inlay
+
+	return pedestal
+end
 
 function WeaponPickups.start(originCFrame: CFrame)
 	for _, stand in STANDS do
 		local def = Loadout.getDef(stand.weaponId)
+		local pedestal = makePedestal(stand, originCFrame)
 
-		local part = Instance.new("Part")
-		part.Name = `{stand.weaponId}Pickup`
-		part.Size = Vector3.new(2, 4, 2)
-		part.Anchored = true
-		part.CanCollide = true
-		part.Color = stand.color
-		part.CFrame = originCFrame * CFrame.new(stand.offset)
-		part.Parent = Workspace
+		local displayCFrame = pedestal.CFrame
+			* CFrame.new(0, PEDESTAL_SIZE.Y / 2 + stand.height, 0)
+			* CFrame.Angles(math.rad(stand.tilt), 0, 0)
+		local display = WeaponVisuals.buildDisplay(stand.weaponId, displayCFrame)
+		if display then
+			display.Parent = pedestal
+		end
 
 		local prompt = Instance.new("ProximityPrompt")
 		prompt.ObjectText = `{def.displayName} ({def.classTag})`
 		prompt.ActionText = "Equip"
 		prompt.HoldDuration = 0
 		prompt.MaxActivationDistance = 8
-		prompt.Parent = part
+		prompt.Parent = pedestal
 
 		local weaponId = stand.weaponId
 		prompt.Triggered:Connect(function(player)

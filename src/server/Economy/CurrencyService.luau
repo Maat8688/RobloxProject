@@ -92,6 +92,28 @@ function CurrencyService.trackEnemy(enemy: EnemyAI.Enemy)
 	end)
 end
 
+-- Pays a reward that isn't a kill: a treasure chest's coins, the dungeon
+-- clear bonus. Crystals are of the player's equipped class, as with kills;
+-- a player with no weapon gets none.
+function CurrencyService.grant(player: Player, coins: number, crystals: number)
+	if not player.Parent then
+		return
+	end
+
+	local balance = getBalance(player)
+	balance.coins += coins
+
+	if crystals > 0 then
+		local weaponId = EquipService.getWeaponId(player)
+		if weaponId then
+			local class = Loadout.classOf(weaponId)
+			balance.crystals[class] = (balance.crystals[class] or 0) + crystals
+		end
+	end
+
+	publish(player, balance)
+end
+
 --[[ Persistence hooks, called only by DataService ]]
 
 function CurrencyService.hydrate(player: Player, coins: number, crystals: { [string]: number })

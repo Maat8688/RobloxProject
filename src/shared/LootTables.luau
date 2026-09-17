@@ -47,6 +47,13 @@ local LootTables: { [string]: LootDescriptor } = {
 		rarity = "common",
 		classTag = nil,
 	},
+	HollowKing = {
+		itemId = "HollowCrownShard",
+		name = "Hollow Crown Shard",
+		flavor = "Still cold. The king is gone; the crown remembers.",
+		rarity = "epic",
+		classTag = nil,
+	},
 }
 
 return LootTables

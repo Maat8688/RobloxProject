@@ -1,6 +1,6 @@
 --!strict
--- Plays AnimationDefs animations on one rig, by writing its Motor6D
--- Transforms every frame — and hands any animation with a published version
+-- Plays AnimationDefs animations on one rig, by writing its joint
+-- (Motor6D or AnimationConstraint) Transforms every frame — and hands any animation with a published version
 -- (AnimationIds) to Roblox's Animator instead.
 --
 -- Two layers, like Roblox animation priorities: a looping base (idle, walk)
@@ -22,6 +22,7 @@ local Shared = ReplicatedStorage.Shared
 local AnimationDefs = require(Shared.AnimationDefs)
 local AnimationIds = require(Shared.AnimationIds)
 local KeyframeMath = require(Shared.KeyframeMath)
+local RigDefs = require(Shared.RigDefs)
 
 local RigAnimation = {}
 
@@ -37,6 +38,10 @@ local IMPACT_KEYFRAME = "Impact"
 
 type AnimationDef = KeyframeMath.AnimationDef
 type PoseMap = KeyframeMath.PoseMap
+
+-- A Motor6D or an AnimationConstraint: anything with a Transform the Animator
+-- writes each frame.
+type Joint = any
 
 export type ActionOptions = {
 	-- Strikes: real seconds from the start of the windup to impact. Everything
@@ -66,7 +71,7 @@ type Layer = {
 export type Controller = {
 	model: Model,
 	rigId: string,
-	joints: { [string]: Motor6D },
+	joints: { [string]: Joint },
 	animator: Animator?,
 	external: boolean,
 	base: Layer?,
@@ -77,20 +82,52 @@ export type Controller = {
 	lastPose: PoseMap,
 	written: { [string]: boolean },
 	tracks: { [string]: AnimationTrack },
+	-- Hit-stop: the rig holds its pose until this clock time.
+	frozenUntil: number,
+	-- The rig's size (RigDefs.scaleOf). Animations are authored at size 1, so
+	-- their offsets in studs are multiplied by this.
+	scale: number,
 }
 
 local function clock(): number
 	return os.clock()
 end
 
-local function findJoints(model: Model): { [string]: Motor6D }
-	local joints = {}
+-- Every animatable joint in a model, keyed by the name of the part it moves.
+--
+-- Two kinds exist. Enemy rigs are built here with Motor6Ds. Player avatars
+-- now spawn with AnimationConstraints instead (Roblox's Avatar Joint Upgrade,
+-- the default for new experiences), where the moved part is Attachment1's
+-- parent. Both expose Transform the same way, so everything past this
+-- function treats them alike. Only looking for Motor6Ds is what used to leave
+-- players' swings and parries unanimated.
+local function findJoints(model: Model): { [string]: Joint }
+	local joints: { [string]: Joint } = {}
 	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("Motor6D") and descendant.Part1 then
-			joints[descendant.Part1.Name] = descendant
+		if descendant:IsA("Motor6D") then
+			local part1 = descendant.Part1
+			if part1 then
+				joints[part1.Name] = descendant
+			end
+		elseif descendant:IsA("AnimationConstraint") then
+			local attachment = (descendant :: any).Attachment1 :: Attachment?
+			local part = attachment and attachment.Parent
+			if part and part:IsA("BasePart") then
+				joints[part.Name] = descendant
+			end
 		end
 	end
 	return joints
+end
+
+-- How many animatable joints a model has, whichever kind. Callers wait for a
+-- replicating rig to be whole before animating it.
+function RigAnimation.countJoints(model: Model): number
+	local count = 0
+	for _ in findJoints(model) do
+		count += 1
+	end
+	return count
 end
 
 function RigAnimation.new(model: Model, rigId: string, external: boolean): Controller
@@ -108,6 +145,10 @@ function RigAnimation.new(model: Model, rigId: string, external: boolean): Contr
 		lastPose = {},
 		written = {},
 		tracks = {},
+		frozenUntil = 0,
+		-- A player's avatar is whatever size Roblox built it; only our own rigs
+		-- carry a scale.
+		scale = if external then 1 else RigDefs.scaleOf(rigId),
 	}
 end
 
@@ -217,6 +258,22 @@ function RigAnimation.setBase(controller: Controller, name: string, speed: numbe
 	}
 end
 
+-- Stops the looping base. On a player's avatar that hands the parts back to
+-- Roblox's Animate script.
+function RigAnimation.clearBase(controller: Controller)
+	local current = controller.base
+	if current and current.track then
+		current.track:Stop(CROSSFADE)
+	end
+	controller.base = nil
+end
+
+-- The name of the looping base playing, if any.
+function RigAnimation.currentBase(controller: Controller): string?
+	local base = controller.base
+	return base and base.name
+end
+
 function RigAnimation.playAction(controller: Controller, name: string, options: ActionOptions?)
 	local anim = AnimationDefs.get(controller.rigId, name)
 	if not anim then
@@ -293,8 +350,21 @@ function RigAnimation.currentAction(controller: Controller): string?
 	return action and action.name
 end
 
-local function toCFrame(values: KeyframeMath.PoseValues): CFrame
-	return CFrame.new(values.px, values.py, values.pz)
+-- Hold the rig's pose for a moment when a blow lands — a few frames of
+-- stillness is what makes a hit read as heavy. Purely visual and per client.
+function RigAnimation.hitStop(controller: Controller, seconds: number)
+	controller.frozenUntil = math.max(controller.frozenUntil, clock() + seconds)
+end
+
+-- A strike still winding up is never held: that would push the visible hit
+-- past the server's impact time, which is exactly what the parry reads.
+local function canHold(layer: Layer, now: number): boolean
+	local windup = layer.windup
+	return not (windup and layer.anim.impact and now - layer.startedAt < windup)
+end
+
+local function toCFrame(values: KeyframeMath.PoseValues, scale: number): CFrame
+	return CFrame.new(values.px * scale, values.py * scale, values.pz * scale)
 		* CFrame.Angles(math.rad(values.rx), math.rad(values.ry), math.rad(values.rz))
 end
 
@@ -322,10 +392,28 @@ function RigAnimation.step(controller: Controller, deltaTime: number)
 	local overlayWeight = 1
 	local overlay = overlaysAnimator(controller)
 
+	-- During a hit-stop, time stands still for this rig: the action's start
+	-- slides forward with the clock, and the base loop doesn't advance.
+	local baseDelta = deltaTime
+	if now < controller.frozenUntil then
+		baseDelta = 0
+		if action and canHold(action, now) then
+			action.startedAt += deltaTime
+		end
+	end
+
+	-- On an external rig (a player's avatar) the base is a stance layered over
+	-- whatever Roblox's Animate script is doing, kept apart from the action so
+	-- each can be blended on its own.
+	local overlayBase: PoseMap = {}
 	local base = controller.base
-	if base and not base.track and not controller.external then
-		base.phase += deltaTime * controller.baseSpeed
-		pose = KeyframeMath.sample(base.anim, base.phase)
+	if base and not base.track then
+		base.phase += baseDelta * controller.baseSpeed
+		if controller.external then
+			overlayBase = KeyframeMath.sample(base.anim, base.phase)
+		else
+			pose = KeyframeMath.sample(base.anim, base.phase)
+		end
 	end
 
 	if action then
@@ -365,14 +453,26 @@ function RigAnimation.step(controller: Controller, deltaTime: number)
 
 	controller.lastPose = pose
 
-	for part, values in pose do
-		local joint = controller.joints[part]
-		if joint then
-			local target = toCFrame(values)
-			if overlay then
-				joint.Transform = joint.Transform:Lerp(target, overlayWeight)
-			else
-				joint.Transform = target
+	if overlay then
+		-- The stance replaces the Animator's pose on the parts it covers (arms
+		-- and torso, while the legs keep walking), and the action blends in over
+		-- the result.
+		for part, joint in controller.joints do
+			local stanceValues = overlayBase[part]
+			local actionValues = pose[part]
+			if stanceValues or actionValues then
+				local transform = if stanceValues then toCFrame(stanceValues, controller.scale) else joint.Transform
+				if actionValues then
+					transform = transform:Lerp(toCFrame(actionValues, controller.scale), overlayWeight)
+				end
+				joint.Transform = transform
+			end
+		end
+	else
+		for part, values in pose do
+			local joint = controller.joints[part]
+			if joint then
+				joint.Transform = toCFrame(values, controller.scale)
 				controller.written[part] = true
 			end
 		end

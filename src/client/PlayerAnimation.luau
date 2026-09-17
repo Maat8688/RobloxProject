@@ -1,12 +1,13 @@
 --!strict
--- Combat animations on players' avatars: a swing per weapon and the parry,
--- layered over Roblox's own walk, run and idle, which keep playing underneath.
+-- Combat animations on players' avatars: each weapon's fighting stance under
+-- walking and idling, its combo swings and critical, the guard held while
+-- blocking, feints, the dodge, flinches and guard breaks.
 --
--- Other players are animated from the server's PlayerCombatAction broadcast.
--- The local player is animated the moment they press, without waiting a round
--- trip, gated by the rules the client can check for itself (equipped weapon,
--- swing cooldown). A swing the server then refuses for lack of stamina will
--- still have animated — an accepted cost of responsive input.
+-- Every player's stance comes from the weapon their character carries (an
+-- attribute set by the server's WeaponVisuals). Other players' actions come
+-- from the server's PlayerCombatAction broadcast. The local player's own are
+-- played the instant they press, by CombatClient, without waiting a round
+-- trip.
 --
 -- The animations are authored for R15 joints; an R6 avatar simply isn't
 -- animated here.
@@ -17,16 +18,21 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage.Shared
 local AnimationDefs = require(Shared.AnimationDefs)
-local Loadout = require(Shared.Loadout)
 local Remotes = require(Shared.Remotes)
 local RigDefs = require(Shared.RigDefs)
+local SoundDefs = require(Shared.SoundDefs)
+local WeaponModelDefs = require(Shared.WeaponModelDefs)
 
 local RigAnimation = require(script.Parent.RigAnimation)
+local SoundFX = require(script.Parent.SoundFX)
 
 local PlayerAnimation = {}
 
 local R15_JOINTS = 15
 local RIG_WAIT_LIMIT = 10
+
+-- The whoosh sounds as the blade comes through, this far into the windup.
+local WHOOSH_AT = 0.6
 
 type Tracked = {
 	controller: RigAnimation.Controller,
@@ -36,18 +42,24 @@ type Tracked = {
 local localPlayer = Players.LocalPlayer
 local tracked: { [Player]: Tracked } = {}
 
-local equippedWeapon: string? = nil
-local dueling = false
-local nextSwingAt = 0
+-- Players whose guard is up, so it can resume once a swing or flinch ends.
+local guardingPlayers: { [Player]: string } = {}
 
-local function countJoints(model: Model): number
-	local count = 0
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("Motor6D") and descendant.Part1 then
-			count += 1
-		end
+-- Motor6Ds or AnimationConstraints, whichever this avatar was built with.
+local countJoints = RigAnimation.countJoints
+
+local function rootOf(character: Model): BasePart?
+	return character:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+-- The stance follows whatever weapon the character is carrying.
+local function refreshStance(entry: Tracked)
+	local weaponId = entry.character:GetAttribute(WeaponModelDefs.WEAPON_ATTRIBUTE)
+	if typeof(weaponId) == "string" then
+		RigAnimation.setBase(entry.controller, AnimationDefs.stance(weaponId))
+	elseif RigAnimation.currentBase(entry.controller) then
+		RigAnimation.clearBase(entry.controller)
 	end
-	return count
 end
 
 local function onCharacterAdded(player: Player, character: Model)
@@ -56,6 +68,7 @@ local function onCharacterAdded(player: Player, character: Model)
 		RigAnimation.destroy(previous.controller)
 		tracked[player] = nil
 	end
+	guardingPlayers[player] = nil
 
 	local humanoid = character:WaitForChild("Humanoid", RIG_WAIT_LIMIT) :: Humanoid?
 	if not humanoid or humanoid.RigType ~= Enum.HumanoidRigType.R15 then
@@ -72,10 +85,18 @@ local function onCharacterAdded(player: Player, character: Model)
 		return
 	end
 
-	tracked[player] = {
+	local entry: Tracked = {
 		controller = RigAnimation.new(character, RigDefs.PLAYER_RIG, true),
 		character = character,
 	}
+	tracked[player] = entry
+
+	refreshStance(entry)
+	character:GetAttributeChangedSignal(WeaponModelDefs.WEAPON_ATTRIBUTE):Connect(function()
+		if tracked[player] == entry then
+			refreshStance(entry)
+		end
+	end)
 end
 
 local function watchPlayer(player: Player)
@@ -89,53 +110,104 @@ local function watchPlayer(player: Player)
 	end
 end
 
-local function play(player: Player, action: string, weaponId: string, windup: number?)
+local function holdGuard(entry: Tracked, weaponId: string, fromStart: boolean)
+	RigAnimation.playAction(entry.controller, AnimationDefs.guard(weaponId), {
+		hold = true,
+		-- Resuming a guard after a flinch skips the snap and just settles in.
+		elapsed = if fromStart then 0 else 0.1,
+	})
+end
+
+local function isStrike(name: string?): boolean
+	return name ~= nil and (string.sub(name, 1, 6) == "swing_" or string.sub(name, 1, 9) == "critical_")
+end
+
+local function whooshLater(entry: Tracked, weaponId: string, windup: number)
+	local root = rootOf(entry.character)
+	task.delay(windup * WHOOSH_AT, function()
+		if root and root.Parent then
+			SoundFX.playAt(SoundDefs.swingSound(weaponId), root.Position)
+		end
+	end)
+end
+
+local function play(player: Player, action: string, weaponId: string, windup: number?, step: number?)
 	local entry = tracked[player]
 	if not entry or entry.character ~= player.Character then
 		return
 	end
+	local controller = entry.controller
 
 	if action == "swing" then
-		RigAnimation.playAction(entry.controller, AnimationDefs.swing(weaponId), { windup = windup })
+		local swingTime = windup or 0.25
+		RigAnimation.playAction(controller, AnimationDefs.swing(weaponId, step or 1), { windup = swingTime })
+		whooshLater(entry, weaponId, swingTime)
+	elseif action == "critical" then
+		local swingTime = windup or 0.5
+		RigAnimation.playAction(controller, AnimationDefs.critical(weaponId), { windup = swingTime })
+		local root = rootOf(entry.character)
+		if root then
+			SoundFX.playAt("critical_windup", root.Position)
+		end
+		whooshLater(entry, weaponId, swingTime)
 	elseif action == "parry" then
-		RigAnimation.playAction(entry.controller, AnimationDefs.PARRY)
+		guardingPlayers[player] = weaponId
+		holdGuard(entry, weaponId, true)
+	elseif action == "guard_end" then
+		guardingPlayers[player] = nil
+		if RigAnimation.currentAction(controller) == AnimationDefs.guard(weaponId) then
+			RigAnimation.stopAction(controller)
+		end
+	elseif action == "feint" then
+		if isStrike(RigAnimation.currentAction(controller)) then
+			RigAnimation.stopAction(controller)
+		end
+		local root = rootOf(entry.character)
+		if root then
+			SoundFX.playAt("feint", root.Position)
+		end
+	elseif action == "dodge" then
+		guardingPlayers[player] = nil
+		RigAnimation.playAction(controller, AnimationDefs.DODGE)
+		local root = rootOf(entry.character)
+		if root then
+			SoundFX.playAt("dodge", root.Position)
+		end
 	end
 end
 
--- Called by CombatClient on the attack input.
-function PlayerAnimation.predictSwing()
-	local weaponId = equippedWeapon
-	if not weaponId then
-		return
-	end
+--[[ The local player, played on input by CombatClient ]]
 
-	local now = os.clock()
-	if now < nextSwingAt then
-		return
-	end
-
-	local attack = Loadout.getDef(weaponId).attack
-	local windup = if dueling then attack.pvpTelegraph else attack.windup
-	nextSwingAt = now + windup + attack.cooldown
-
-	play(localPlayer, "swing", weaponId, windup)
+function PlayerAnimation.playLocal(action: string, weaponId: string, windup: number?, step: number?)
+	play(localPlayer, action, weaponId, windup, step)
 end
 
--- Called by CombatClient on the parry input.
-function PlayerAnimation.predictParry()
-	local weaponId = equippedWeapon
+-- Freeze the local player's pose for a moment as their blow lands.
+function PlayerAnimation.hitStopLocal(seconds: number)
 	local entry = tracked[localPlayer]
-	if not weaponId or not entry then
+	if entry then
+		RigAnimation.hitStop(entry.controller, seconds)
+	end
+end
+
+-- Being hit cancels a swing in progress (the server's hitstun does the same).
+function PlayerAnimation.playLocalHurt()
+	local entry = tracked[localPlayer]
+	if not entry then
 		return
 	end
-
-	-- Mashing doesn't restart the guard; the server's lockout is what actually
-	-- punishes it.
-	if RigAnimation.currentAction(entry.controller) == AnimationDefs.PARRY then
-		return
+	local current = RigAnimation.currentAction(entry.controller)
+	if current == nil or isStrike(current) then
+		RigAnimation.playAction(entry.controller, AnimationDefs.HURT)
 	end
+end
 
-	play(localPlayer, "parry", weaponId)
+function PlayerAnimation.playLocalGuardBreak()
+	local entry = tracked[localPlayer]
+	guardingPlayers[localPlayer] = nil
+	if entry then
+		RigAnimation.playAction(entry.controller, AnimationDefs.GUARD_BREAK)
+	end
 end
 
 function PlayerAnimation.start()
@@ -150,31 +222,29 @@ function PlayerAnimation.start()
 			RigAnimation.destroy(entry.controller)
 			tracked[player] = nil
 		end
-	end)
-
-	Remotes.get("WeaponEquipped").OnClientEvent:Connect(function(payload)
-		equippedWeapon = payload.weaponId
-	end)
-
-	Remotes.get("PvPStatusChanged").OnClientEvent:Connect(function(payload)
-		dueling = payload.status == "dueling"
+		guardingPlayers[player] = nil
 	end)
 
 	Remotes.get("PlayerCombatAction").OnClientEvent:Connect(function(payload)
-		-- The local player's own actions were already animated on input.
-		if payload.userId == localPlayer.UserId then
+		local player = Players:GetPlayerByUserId(payload.userId)
+		-- The local player's own actions were animated on input. (A guard the
+		-- server breaks comes down through CombatClient, which hears about it
+		-- from PlayerHit.)
+		if not player or player == localPlayer then
 			return
 		end
 
-		local player = Players:GetPlayerByUserId(payload.userId)
-		if player then
-			play(player, payload.action, payload.weaponId, payload.windup)
-		end
+		play(player, payload.action, payload.weaponId, payload.windup, payload.step)
 	end)
 
 	-- After Roblox's Animate script has posed each avatar for this frame.
 	RunService.PreSimulation:Connect(function(deltaTime)
-		for _, entry in tracked do
+		for player, entry in tracked do
+			-- A guard still held when a flinch or swing finishes settles back in.
+			local guardWeapon = guardingPlayers[player]
+			if guardWeapon and RigAnimation.currentAction(entry.controller) == nil then
+				holdGuard(entry, guardWeapon, false)
+			end
 			RigAnimation.step(entry.controller, deltaTime)
 		end
 	end)

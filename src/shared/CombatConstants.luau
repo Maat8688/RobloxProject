@@ -35,16 +35,70 @@ CombatConstants.FUTURE_TOLERANCE = 0.05
 -- enemy swinging at someone else entirely.
 CombatConstants.PARRY_RANGE_MARGIN = 4
 
---[[ Stamina ]]
+--[[ Parrying ]]
 
--- Stamina gates parry spam. Without it, mashing the key beats the timing
--- system outright, which would contradict "skill must count" in DESIGN.md.
-CombatConstants.MAX_STAMINA = 100
-CombatConstants.STAMINA_REGEN_PER_SECOND = 20
-CombatConstants.PARRY_STAMINA_COST = 15
+-- Pressing the block key opens the weapon's parry frames (WeaponDefs
+-- parry.earlyTolerance): a parryable hit landing inside them is parried.
+-- A press whose frames catch nothing puts parrying on this cooldown, counted
+-- from the end of those frames; presses during it only block. That is what
+-- makes mashing fail: it blocks, it never parries.
+CombatConstants.PARRY_COOLDOWN = 0.6
 
--- Lockout applied after a failed parry, so a whiff has a real cost.
-CombatConstants.WHIFF_LOCKOUT = 0.5
+--[[ Blocking and posture ]]
+
+-- Holding the block key guards against parryable hits from the front. A
+-- blocked hit costs no health, but fills posture; when posture fills, the
+-- guard breaks. Unparryable attacks ignore the guard: they must be dodged.
+CombatConstants.MAX_POSTURE = 100
+-- Posture a blocked hit adds, per point of the damage it would have dealt.
+CombatConstants.BLOCK_POSTURE_PER_DAMAGE = 2.2
+-- Posture drains back to zero, starting this long after it last filled.
+CombatConstants.POSTURE_REGEN_DELAY = 1.5
+CombatConstants.POSTURE_REGEN_PER_SECOND = 30
+-- A clean parry takes this much posture off, so parrying well keeps you in
+-- the fight and blocking everything doesn't.
+CombatConstants.PARRY_POSTURE_RESTORE = 25
+-- A broken guard stuns: no attacking, blocking or dodging, and the hit that
+-- broke it lands in full.
+CombatConstants.GUARD_BREAK_STUN = 1.2
+-- How wide the guard covers, centred on where the player faces.
+CombatConstants.BLOCK_ARC_DEGREES = 180
+
+--[[ Hitstun ]]
+
+-- Taking an unblocked hit stuns briefly and cancels a swing in progress.
+CombatConstants.PLAYER_HIT_STUN = 0.35
+-- A player's hit interrupts an enemy: a windup without hyper armour is
+-- cancelled, and an idle enemy's next attack is delayed.
+CombatConstants.ENEMY_FLINCH_DURATION = 0.45
+-- After a flinch, an enemy can't be flinched again for this long, so its next
+-- attack comes through and has to be parried, blocked or dodged. Otherwise
+-- attacking first would simply lock every enemy down.
+CombatConstants.ENEMY_FLINCH_IMMUNITY = 1.6
+
+--[[ Dodging ]]
+
+-- Seconds of invulnerability from the dodge press.
+CombatConstants.DODGE_IFRAMES = 0.3
+CombatConstants.DODGE_COOLDOWN = 1.8
+-- The dash itself, applied by the client to its own character.
+CombatConstants.DODGE_SPEED = 46
+CombatConstants.DODGE_DURATION = 0.2
+
+--[[ Cancelling ]]
+
+-- A swing can be feinted (or dodge-cancelled) only in this first fraction of
+-- its windup; past it, you're committed.
+CombatConstants.CANCEL_WINDOW_FRACTION = 0.65
+CombatConstants.FEINT_COOLDOWN = 1.5
+
+--[[ Movement ]]
+
+-- Walking speed while attacking, blocking or stunned, as a fraction of normal.
+-- Applied by the client to its own character.
+CombatConstants.ATTACK_WALK_FRACTION = 0.4
+CombatConstants.BLOCK_WALK_FRACTION = 0.5
+CombatConstants.STUN_WALK_FRACTION = 0.25
 
 --[[ Stagger and punish ]]
 

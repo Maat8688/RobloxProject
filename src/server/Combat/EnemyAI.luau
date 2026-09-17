@@ -32,7 +32,7 @@ local ROBLOX_API: RigAssembly.Api = {
 	Enum = Enum,
 }
 
-export type EnemyState = "idle" | "telegraph" | "staggered" | "dead"
+export type EnemyState = "idle" | "telegraph" | "staggered" | "flinched" | "dead"
 
 -- Receives the player who landed the killing blow, or nil.
 export type DeathCallback = (killer: Player?) -> ()
@@ -78,9 +78,10 @@ function EnemyAI.spawn(
 	-- The hitbox: invisible, anchored, and the only part that collides. Every
 	-- position the combat code reasons about is this part's. Named like an R15
 	-- root so the rig and its animations recognise it.
+	local rootSize = RigDefs.rootSize(defId)
 	local root = Instance.new("Part")
 	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(RigDefs.ROOT_SIZE[1], RigDefs.ROOT_SIZE[2], RigDefs.ROOT_SIZE[3])
+	root.Size = Vector3.new(rootSize[1], rootSize[2], rootSize[3])
 	root.Anchored = true
 	root.Transparency = 1
 	root.CFrame = homeCFrame

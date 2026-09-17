@@ -277,10 +277,15 @@ outcome.
   rooms of random kind and enemy type), not a branching graph. Still
   room-prefab + connector based and varied every server start; a real layout
   algorithm is a later enhancement, not a gap.
+  *Superseded by the dungeon runs below:* a branching, seeded layout with
+  room purposes and a boss.
 - **Step 5**: each combat room's single enemy guards its chest 1:1. A locked
   chest shows a barrier and has no prompt at all; the guard's first death
   unlocks it permanently, even though the guard respawns. A multi-enemy
   `encounterGroupId` only matters once rooms hold more than one enemy.
+  *Superseded by the dungeon runs below:* chests are in Elite and Treasure
+  rooms only, locked until every enemy in the room is dead, and dungeon
+  enemies don't respawn. `encounterGroupId` was never built and is retired.
 - **Step 6**: chests grant a real `ItemInstance` with rarity fixed by which
   enemy guarded it, not rolled. Items are collectible only — not consumed as
   upgrade materials.
@@ -447,7 +452,8 @@ lowerCamelCase (`CombatServer.start`) rather than the fork's PascalCase.
 
 Gray-box on purpose: no uploaded art, sounds or animations — only Roblox's
 built-in defaults — so everything here is readable feedback, not final
-visuals.
+visuals. *(Built on in the game-feel pass below, under the same no-uploads
+rule.)*
 
 - **All-around attacks draw their real hit area on the ground.** Their hit
   radius can exceed the range they're used from (the SkeletonWarrior slams
@@ -468,6 +474,10 @@ visuals.
 - **No sounds yet.** Roblox's built-in sound files aren't reliably present,
   and anything else is an uploaded asset, which belongs with the real art in
   a later pass.
+  *Superseded in the game-feel pass:* the premise was half right. The client
+  ships only about ten sound files (checked), but Roblox's own classic sounds
+  are published assets marked public domain, usable with no upload. See
+  that pass below.
 - **Fixed: the Shambler's `Lunge` could be chosen from beyond its reach.** It
   was legal at up to 20 studs but hit only to 18, and enemies hold still
   through a windup, so a lunge started at 19–20 studs always missed. A test
@@ -533,6 +543,243 @@ visuals.
   experience and revoked at any time; a password can't. Not needed yet: rough
   animations need no uploads at all.
 
+## Decisions made in the game-feel pass (Sept 2026)
+
+Asked for by the repo's co-developer: make the game look and feel less like
+a gray box before the first playtest. Still no uploaded assets of our own —
+everything is Parts, the client's built-in textures, and Roblox's
+public-domain sounds — so it can all be swapped for real art later.
+
+- **Feel never touches timing.** Every effect follows a server report, and
+  nothing moves the visible impact of an enemy strike: hit-stop refuses to
+  hold a strike before impact, and the extra keyframes added to strikes all
+  sit inside the same windup-to-impact span that playback already stretches.
+  The parry window is read off that impact, so this is non-negotiable.
+- **Strikes coil, then snap, then follow through.** The rig eases into the
+  windup, keeps drawing back a little (a "coil" keyframe), snaps linearly to
+  impact, and carries past the hit pose before recovering. The coil is what
+  reads as "about to hit", and the shorter snap makes every blow look heavier,
+  without changing any impact time. Only upper-body rotations are
+  exaggerated, so feet stay planted and the workbench's floor checks still
+  pass.
+- **One module owns intensity** (`CombatFeel`). A parry must always feel
+  bigger than a hit, and an undodged slam bigger than both; that ordering is
+  only maintainable if every number sits side by side. Current ladder, as
+  camera trauma: hit 0.16, riposte 0.32, parry 0.36, taking a hit 0.2–0.6,
+  slam 0.55 at the centre.
+- **Camera shake is added after the camera script and removed before it.**
+  Roblox's camera script works out where to look from the camera's own
+  CFrame, so a shake left in place accumulates into drift. Yaw shake is kept
+  smallest because CameraLock turns the character to match the camera.
+- **Damage is an edge vignette, not a full-screen flash.** Covering the
+  screen at the moment you're hit hides the next telegraph — the one thing you
+  most need to see.
+- **Weapons are built on the server** so everyone sees what everyone else
+  holds, which is how you read a party's classes at a glance. Pieces are
+  massless and non-colliding, and hit-reg still reads only the root part, so
+  none of the combat tuning moved. Trails are per client.
+- **Upgrades are visible.** A light from +1, sparkles from +3, a neon blade at
+  +5. Progress you paid crystals for should show to the people next to you.
+- **The start room's stations show what they do**: each weapon floats above
+  its pedestal lit in its class colour, the blacksmith is an anvil by a
+  burning forge, the duel stand has crossed blades.
+- **Dusk, torches and fog** (`default.project.json` → Lighting, Future
+  technology). Rooms stay open-topped, so the sky is part of the mood; torches
+  do the lighting work. All numbers there are first guesses, like every other
+  tunable.
+- **Corridors are walled.** They were bare strips over the void, so a strafing
+  player could simply walk off.
+- **Sounds are data** (`SoundDefs`), keyed by name, the same way animations
+  are. The ids in use are Roblox's own 2009 classic sounds (sword slash,
+  lunge, unsheath, collide, snap, clicks), published by the Roblox account and
+  marked public domain, plus two files shipped inside the client. One clip
+  covers several sounds at different pitches. These are placeholders chosen
+  because they're safe to use, not because they're right: replacing an id is
+  the whole job.
+- **An enemy windup makes a sound.** It's a second, audio cue for the parry
+  beat, which matters for anyone fighting something at the edge of the
+  screen. If it proves too noisy with many enemies, lower its volume before
+  removing it.
+
+## Decisions made building dungeon runs (Sept 2026)
+
+Asked for by Maat8688: a randomised dungeon with one boss room to finish it,
+rooms of different sizes, and rooms with different purposes. Three choices
+were put to him and answered: when the boss dies, pay out and then replace
+the dungeon with a new one; enemies don't respawn within a dungeon; and all
+four proposed room types (Combat/Elite, Treasure, Shrine, Trap). *(Trap
+rooms were replaced by ambush rooms after the first playtest — see below.)*
+
+- **A dungeon is a run with an end.** running → boss dies → everyone in the
+  dungeon is paid → 15 s countdown → players return to the start room → a new
+  dungeon is generated. One server, no teleporting between places, so the
+  whole loop can be played in Studio. Separate lobby and dungeon places are
+  still the likely end state once parties exist; this doesn't block that.
+- **Rooms stay cleared.** Dungeon enemies don't respawn, which is what makes
+  "rooms cleared 3/6" mean something and a chest locked behind a room's
+  enemies a real gate. This reverses the step-2/step-5 choice that guards
+  respawn "for repeat practice": the practice is now the next dungeon.
+  `CombatServer` still respawns enemies by default for anything that asks.
+- **The shape is fixed; the details are random.** Every dungeon is Start →
+  fights (one Elite in the back half, one Trap never first) → Shrine → Boss,
+  with treasure branches off the fights. Randomness picks the length (6–8
+  rooms after the Start), turns, sizes, layouts, enemies and branches. A
+  fully random mix could put the shrine anywhere or the elite first; a fixed
+  shape guarantees the pacing: warm up, get tested, recover, face the boss.
+- **Layouts are generated in pure code from a seed**, with a hand-rolled
+  generator rather than Roblox's `Random`, so the layout rules can be tested
+  across hundreds of dungeons, and a broken one reproduced from its seed.
+  Placement is place-and-check (each room off a random free side of the last,
+  rejected if it or its corridor overlaps anything); a main path that boxes
+  itself in throws the attempt away and retries, a branch that doesn't fit is
+  skipped.
+- **Everything grows north of the start room**, so the duel arena to the
+  south can never collide with a dungeon.
+- **The start room is permanent.** It holds the weapon stands, anvil and
+  duel queue, and players are sent there during a reset, so it's built once
+  and each dungeon starts from its north door.
+- **One boss, only in the boss room, only through the shrine.** The boss room
+  has a single door, so the fight can't be flanked or skipped into. The
+  shrine heals to full once per player per dungeon, so a party meets the
+  boss at full health: the boss is the test, not the attrition before it.
+- **The Hollow King is built from every tool the game already teaches**: a
+  fast parryable Cleave, a slow Overhead that's the big parry opportunity, an
+  unparryable Shockwave with a bleed (the healer pillar), and a BoneSpear so
+  kiting to heal isn't free. Tuned for a group like the rest of the dungeon;
+  600 health will be slow solo, and that's acceptable under the group-first
+  decision. It's a 1.6× rig, which needed rig scale support (below).
+- **Rigs can be scaled.** Animations stay authored at size 1 and pose offsets
+  are multiplied at playback and in the workbench, so one animation
+  vocabulary still covers every rig and the floor checks still hold the boss
+  to the same standard.
+- **The clear is shared.** Every player in the server who isn't in a duel
+  gets the clear reward and a Hollow Crown Shard, not only whoever landed the
+  last hit. Group content should reward the group. The boss's own kill reward
+  still goes to the killer. With one shared dungeon per server, "in the
+  server" is the party; revisit when real parties exist.
+- **Traps are unparryable telegraphs with no enemy**, drawn and felt exactly
+  like a GroundSlam: a filling danger zone, then a blast. They only fire while
+  someone is in the room, and some plates in every volley are the ones
+  nearest a player, so standing still never works.
+  *Superseded after the first playtest:* trap rooms were replaced by ambush
+  rooms, in the same slot on the main path. See "Decisions from the first
+  playtest".
+- **Treasure is off the path, not on it.** Treasure rooms are always dead-end
+  branches, sometimes behind an extra fight or trap: an optional detour with
+  a known payoff (a relic, or the guard's loot, plus coins).
+- **A room's purpose reads from its doorway**: torch colour per purpose (red
+  for the elite hall, gold for a vault, teal for the shrine, blue ghost-fire
+  for the throne room).
+- **The TrainingDummy is in no dungeon pool.** A stationary enemy that
+  punishes you for standing near it doesn't belong in a dungeon, and it would
+  attack players shopping in the start room. It stays defined for tuning.
+
+## Decisions from the first playtest (Sept 2026)
+
+Maat8688's report after playing: "I don't see me swinging my weapon really",
+"the parry is not engaging at all and very hard", and the trap room "was not
+good at all — do it better or scrap it".
+
+- **The swing wasn't subtle, it was missing.** Roblox's Avatar Joint Upgrade,
+  now the default, builds player avatars from `AnimationConstraint`s instead
+  of `Motor6D`s. Player animation only looked for `Motor6D`s, found none, and
+  never animated a single swing or parry. Enemies were unaffected because
+  their rigs are built here. Both joint kinds are now supported.
+- **Swings are combos.** Three swings per weapon, each its own animation, the
+  third a finisher (1.6–1.8× damage, longer recovery). Windups are roughly
+  halved (sword 0.45 s → 0.26 s), since a sluggish button press read as the
+  game not responding, and every swing draws a slash arc and steps the player
+  forward. This softens step 2's "windup long enough to be committal": the
+  commitment now lives in the combo — once the finisher starts, you're in it.
+- **The parry got a timing cue: a ring that closes on impact.** The glow's
+  brightness gave no precise moment to press on. The ring lands exactly on the
+  server's impact time and its target turns gold for exactly the local
+  player's own parry window, so the window is visible, and learnable, per
+  weapon. Unparryable attacks get a red pulsing ring and "DODGE".
+- **Parry windows roughly doubled** (Tank 200/100 → 300/160 ms, Healer
+  140/80 → 240/130, Assassin 80/50 → 170/90). The ordering and the wider
+  early half are unchanged; the old numbers were first guesses, and the first
+  player found them too hard even in Studio with no ping.
+- **Holding the parry key guards.** A parry was all-or-nothing: miss the
+  window by a hair and take the full hit, which made trying to parry feel
+  worse than not. Now the press still parries if it's in the window, and
+  holding the key blocks what it missed: 25% of the damage, paid for in
+  stamina, only from the front, and never against unparryable attacks. A hit
+  the guard can't pay for breaks it. Guarding also halves walking speed.
+  **This changes a locked-in rule**: "a whiff costs a lockout" still holds for
+  parrying (0.5 s → 0.35 s), but a mistimed press now blocks instead of
+  leaving you open. Parry anti-spam survives: mashing only ever blocks, which
+  still takes damage and drains stamina, while a clean parry takes none and
+  staggers. Press cost dropped 15 → 6, since the block's stamina cost is now
+  where a missed read gets paid for.
+- **Trap rooms are replaced by ambush rooms.** Dodging random floor plates
+  tested nothing combat teaches and wasn't fun. An ambush seals the gates once
+  you're inside and sends two waves (2, then 3 enemies), then opens with a
+  chest: the combat itself, under pressure. A party that dies inside gets a
+  reset, not a lock-out. `HazardTelegraph` and `TrapService` are gone.
+
+## Decisions from the second playtest: Deepwoken-style combat (Sept 2026)
+
+Maat8688's report: the animations still don't look good, the parry "should
+not have those visuals", the swing trails aren't wanted, and the mechanics
+should be "more like Deepwoken". This pass rebuilds the defensive and
+offensive loop on Deepwoken's model while keeping this game's pillars:
+server authority, class payoffs on parry, unparryable attacks that must be
+dodged, and group content.
+
+- **Parrying is a block press with frames, judged when the hit lands.**
+  Pressing block opens the weapon's parry frames (Tank 280 ms, Healer 240,
+  Assassin 200). Nothing is decided on the press: when each hit lands, one
+  inside the frames of the player's last press, from the front, is parried.
+  This replaces "evaluate the press against the nearest incoming attack":
+  there's no target selection to get wrong, one press can catch several
+  hits, and a press can't parry a hit that already landed. The timestamp
+  authority check is unchanged.
+- **Missing a parry puts it on cooldown, and holding block blocks.** A press
+  whose frames catch nothing can't open frames again for 0.6 s; presses in
+  that time only block. That is the anti-mash rule now, replacing stamina and
+  the whiff lockout.
+- **Stamina is gone; posture replaces it.** A blocked hit costs no health but
+  fills posture. Posture drains back after 1.5 s without blocking. Filling it
+  breaks the guard: a 1.2 s stun, and the hit lands in full. A clean parry
+  takes posture off. This supersedes the stamina decisions from the slice
+  ("parry costs stamina and a whiff costs a lockout") and the first playtest
+  (block for 25% damage and stamina): blocking is safe for health but not
+  forever, and parrying is what keeps a guard alive.
+- **No timing visuals for parryable attacks.** The closing ring from the first
+  playtest and the white wind-up glow are removed: attacks are read from
+  their animations and the press is timed by eye, as in Deepwoken.
+  Unparryable attacks still flash red at wind-up start, because they change
+  the right answer (dodge, don't block) in a way a pose can't show. All-around
+  attacks keep a faint danger zone, because their radius can't be judged
+  from the animation.
+- **Hits interrupt, both ways.** A hit that lands on a player stuns them for
+  0.35 s and cancels their swing. A player's hit flinches an enemy: it cancels
+  a windup unless the attack has hyper armour (every heavy or unparryable
+  attack does), then the enemy can't be flinched again for 1.6 s. Without that
+  immunity, attacking first would lock every enemy down forever.
+- **Dodge (Q) is a dash with 0.3 s of invulnerability**, on a 1.8 s cooldown.
+  The press is timestamped and checked like a parry. It can cancel a swing
+  only early in its windup. This is now the main answer to unparryable
+  attacks.
+- **Critical (R) and feint (right click).** Each weapon has a heavy attack on
+  a 5–6 s cooldown (the Staff's hits all around). A swing can be feinted in
+  the first 65% of its windup, on a 1.5 s cooldown: baiting a parry matters
+  more in duels than against enemies, but it's the same system. Criticals are
+  dungeon-only for now; duels keep to the opening swing.
+- **Four-hit combos with full-body animation.** Every weapon has four swings
+  and a critical with real footwork (a stepping stance with the hips dropped
+  so the feet stay planted, checked by the workbench), plus a fighting stance
+  per weapon held under Roblox's walk. Strikes now ease into the hit and out
+  of the follow-through (new `In`/`Out` easings) instead of moving linearly.
+  Walking slows to 40% while attacking, 50% while blocking and 25% while
+  stunned.
+- **No trails, no slash arcs, no screen flash on parry.** A parry is felt
+  through the clang, the sparks, the light and the freeze.
+- **The debug readout is hidden** and Studio-only (F2). The game's own HUD
+  shows only posture (while it's above zero) and the dodge and critical
+  cooldowns.
+
 ## Open / not yet decided
 
 - ~~Is solo play fully supported, or is this group-first content? This changes
@@ -569,3 +816,6 @@ visuals.
     numbers, parry sparks). Saving is untested against a real DataStore until
     the place is published with Studio API access enabled; real art, sound and
     animation are still ahead.
+11. ~~Dungeon runs: randomised layouts, room sizes and purposes, a boss.~~
+    Built: see "Decisions made building dungeon runs". Needs playtesting for
+    pacing, ambush waves and boss health.

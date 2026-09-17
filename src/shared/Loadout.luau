@@ -48,6 +48,40 @@ function Loadout.classOf(weaponId: string): string
 	return Loadout.getDef(weaponId).classTag
 end
 
+-- Which combo step a swing pressed at `now` is. `previousStep` is the step of
+-- the last swing (0 if none), and `comboExpiresAt` when its window closes.
+-- Continuing past the finisher starts over at 1. Shared by the server, which
+-- decides, and the client, which predicts the animation.
+function Loadout.nextComboStep(attack: WeaponDefs.AttackProfile, previousStep: number, now: number, comboExpiresAt: number): number
+	if previousStep >= 1 and previousStep < #attack.combo and now <= comboExpiresAt then
+		return previousStep + 1
+	end
+	return 1
+end
+
+export type SwingTiming = {
+	windup: number,
+	-- From the press until another swing may start.
+	readyAfter: number,
+	-- From the press until the combo window closes.
+	comboExpiresAfter: number,
+	damageMultiplier: number,
+	finisher: boolean,
+}
+
+function Loadout.swingTiming(attack: WeaponDefs.AttackProfile, step: number): SwingTiming
+	local combo = attack.combo[step]
+	assert(combo, `No combo step {step}`)
+	local finisher = step == #attack.combo
+	return {
+		windup = combo.windup,
+		readyAfter = combo.windup + (if finisher then attack.finisherRecovery else attack.cooldown),
+		comboExpiresAfter = combo.windup + attack.comboWindow,
+		damageMultiplier = combo.damageMultiplier,
+		finisher = finisher,
+	}
+end
+
 -- Stable, sorted list so the debug keybinds and any future UI agree on order
 -- regardless of table iteration order.
 function Loadout.allWeaponIds(): { string }
