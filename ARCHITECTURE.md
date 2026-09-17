@@ -37,12 +37,20 @@ src/shared/            -> ReplicatedStorage.Shared
   EconomyDefs.luau       -- upgrade cost curve, tiers, upgraded damage (pure).
                          -- Shared so the client can show a price; the server
                          -- always recomputes before charging
+  PlayerDataSchema.luau  -- saved-progress shape: defaults, migration,
+                         -- sanitising, session-lock rules (pure). Shared only
+                         -- so it's testable; the client never uses it
   Remotes.luau           -- every RemoteEvent is created here, from a fixed list;
                          -- nothing created ad hoc elsewhere
   __tests__/             -- Jest specs, mounted by test.project.json only
 
 src/server/            -> ServerScriptService.Server
-  init.server.luau       -- bootstrap: combat, dungeon, stations, arena, spawning
+  init.server.luau       -- bootstrap: combat, dungeon, stations, arena, then
+                         -- players
+  DataService.luau       -- loads and saves progress: session locks, autosave,
+                         -- final save on leave and on shutdown
+  SpawnService.luau      -- when characters exist: first spawn only once a
+                         -- profile has loaded, start-room placement, respawn
   EquipService.luau      -- the only owner of equipped weapon + upgrade levels
   InventoryService.luau  -- the only owner of inventory
   WeaponPickups.luau     -- weapon stands in the start room (ProximityPrompt)
@@ -73,7 +81,6 @@ src/server/            -> ServerScriptService.Server
     Duelist.luau         -- one side of a duel: state machine + virtual health
     PvPCombatServer.luau -- resolves duel swings and parries on the PvE rules;
                          -- listens on no remote itself
-  DataService.luau       -- (planned) DataStore read/write, owns PlayerData
 
 src/client/            -> StarterPlayer.StarterPlayerScripts.Client
   init.client.luau       -- bootstrap
@@ -95,8 +102,8 @@ lune/                  -> not mapped by Rojo; Lune scripts run from the repo roo
 ```
 
 **Pure-module rule.** `CombatConstants`, `ParryMath`, `DamageMath`,
-`AttackSelector`, `Loadout`, `WeaponDefs`, `EnemyDefs`, `LootTables` and
-`EconomyDefs` must not call any Roblox API. That is what keeps the combat and
+`AttackSelector`, `Loadout`, `WeaponDefs`, `EnemyDefs`, `LootTables`,
+`EconomyDefs` and `PlayerDataSchema` must not call any Roblox API. That is what keeps the combat and
 economy math unit-testable, and what lets the same specs run headless under
 Lune. Anything needing `game`, `workspace` or `Instance` belongs in the server
 or client layer, not in these files. `lune run test` enforces this for every
@@ -111,6 +118,14 @@ runner fails loudly on anything else — extend it rather than working around it
 `EquipService`, inventory only in `InventoryService`, currency only in
 `CurrencyService`, per-player combat resources only in `PlayerCombatState`.
 Everything else asks them.
+
+**Persistence rule.** Each persisted service exposes `hydrate`, `snapshot`
+and `release`, and only `DataService` calls them. **A persisted service must
+never clear a player's state on `PlayerRemoving`:** Roblox doesn't guarantee
+the order those handlers run in, so a cleanup could beat the final save and
+write an empty profile. `DataService` calls `release` once that save is done.
+A new persisted field needs all three hooks, a `PlayerDataSchema` field, and
+(if its shape changes) a migration.
 
 ## Naming registry — RemoteEvents
 
@@ -128,8 +143,9 @@ All payloads are a single table.
 | `ParryResult` | Server → Client | `{ verdict, success, deltaMs, stamina, riposteUntil, enemyId? }` | Parry outcome, PvE and PvP. `deltaMs` is signed distance from impact. `enemyId` is what the press resolved against (the attacker's name in a duel) |
 | `AttackResult` | Server → Client | `{ hit, reason, damage, riposte, enemyId? }` | Swing outcome. `reason` is from the attack-result registry below |
 | `HealBurst` | Server → Client | `{ amount, healerName }` | Fired to each player actually healed by a parry-triggered burst heal |
-| `WeaponEquipped` | Server → Client | `{ weaponId, classTag, upgradeLevel }` | Fired on equip and whenever the equipped weapon's upgrade level changes |
-| `ChestOpened` | Server → Client | `{ chestId, loot }` | `loot` is a list holding one `LootTables` descriptor (display info, not the stored `ItemInstance`) |
+| `ProfileLoaded` | Server → Client | `{ persistent }` | The player's progress is ready. `persistent` is false only in a Studio session running without DataStore access |
+| `WeaponEquipped` | Server → Client | `{ weaponId, classTag, upgradeLevel }` | Fired on equip, on load, and whenever the equipped weapon's upgrade level changes |
+| `ChestOpened` | Server → Client | `{ chestId, loot, inventoryFull? }` | `loot` is a list holding one `LootTables` descriptor (display info, not the stored `ItemInstance`). With `inventoryFull`, `loot` is empty and the chest stays shut |
 | `InventoryUpdated` | Server → Client | `{ items }` | The player's full `ItemInstance` list whenever it changes |
 | `CurrencyUpdated` | Server → Client | `{ coins, crystals }` | Whenever a balance changes; `crystals` is keyed by class |
 | `UpgradeResult` | Server → Client | `{ success, reason?, newLevel? }` | Blacksmith outcome; `reason` is player-facing refusal text |
@@ -265,16 +281,34 @@ entry. Adding a class adds its crystal type for free — don't invent a parallel
 ## Data schemas
 
 ```lua
--- PlayerData (planned — nothing is persisted until DataService exists)
+-- Stored DataStore value, one per player. Store "PlayerData_v1"
+-- ("PlayerData_v1_Studio" from Studio), key "player_<UserId>".
 {
+  data: PlayerData,
+  session: SessionLock?,   -- absent when no server holds the profile
+}
+
+-- SessionLock (PlayerDataSchema.SessionLock)
+{
+  jobId: string,           -- game.JobId of the owning server
+  heartbeat: number,       -- os.time() of its last save; stale after 180 s
+}
+
+-- PlayerData (PlayerDataSchema.PlayerData)
+{
+  version: number,         -- schema version; a newer one than the server
+                           -- knows stops the load rather than being replaced
   coins: number,
   crystals: { [classTag]: number },
-  equipped: { weapon: weaponId, chest: itemId?, boots: itemId? },
+  equipped: { weapon: weaponId? },  -- a table so armour slots can join later
   upgradeLevels: { [weaponId]: number },
-  inventory: { ItemInstance },  -- a list, not keyed by itemId: a player can
-                                -- hold several copies of one item, each with
-                                -- its own upgradeLevel
+  inventory: { ItemInstance },      -- a list, not keyed by itemId: a player can
+                                    -- hold several copies of one item, each
+                                    -- with its own upgradeLevel. Capped at
+                                    -- PlayerDataSchema.MAX_INVENTORY
 }
+-- Unknown class, weapon and item ids are preserved, never dropped: they may
+-- belong to newer content, and a rollback must not delete that progress.
 
 -- ItemInstance (InventoryService.ItemInstance)
 {

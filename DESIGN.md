@@ -6,8 +6,9 @@
 
 ## Status
 
-Build-order steps 1–9 are code-complete (Sept 2026), lint and build clean,
-with 102 unit tests passing against the pure combat and economy modules.
+Build-order steps 1–9 are code-complete (Sept 2026), and step 10's
+persistence is built. Lint and build are clean, with 127 unit tests passing
+against the pure combat, economy and save-data modules (`lune run test`).
 Steps 1–3 were built on this branch; steps 4–9 were built on Maat8688's fork
 and merged in, re-based onto this branch's combat core (see
 [Merge of Maat8688's fork](#merge-of-maat8688s-fork-sept-2026)).
@@ -19,15 +20,17 @@ weapon-classes picked up from stands in the start room; server-authoritative
 parry, hit-reg and stagger throughout; a bleed on the SkeletonWarrior's
 unparryable slam; a Healer burst heal that reaches allies; kills paying coins
 and class-keyed crystals, spent at a start-room anvil across five upgrade
-tiers; an inventory panel; and a 1v1 duel arena on the same combat rules.
+tiers; an inventory panel; a 1v1 duel arena on the same combat rules; and
+saved progress, session-locked across servers.
 
 **None of it has had a tuning pass, and the merged whole has never run in
 Studio.** Every number in `CombatConstants`, `WeaponDefs`, `EnemyDefs` and
 `EconomyDefs` is a first guess. Asserted rather than tested: the Assassin's
 80/50 ms window may be unplayable at real ping; the timestamp tolerance may
-reject honest players during ping spikes; and the Jest wiring in
-`tests/jest.config.luau` has never been run under real Jest. No
-animations, models or VFX — gray-box until step 10.
+reject honest players during ping spikes; the Jest wiring in
+`tests/jest.config.luau` has never been run under real Jest; and saving has
+never touched a real DataStore — that needs the place published with Studio
+API access enabled. No animations, models or VFX yet.
 
 ## Core loop
 
@@ -390,6 +393,54 @@ so each adaptation can be reviewed on its own.
 comment the fork added to `.gitignore`. Module functions follow this branch's
 lowerCamelCase (`CombatServer.start`) rather than the fork's PascalCase.
 
+## Decisions made building persistence (step 10, Sept 2026)
+
+- **What's saved:** coins, class crystals, the equipped weapon, per-weapon
+  upgrade levels, and the inventory. Combat resources (stamina, riposte) and
+  duel state are session-only.
+- **The equipped weapon is saved**, even though the core loop starts at the
+  weapon stands. Picking a weapon every session adds nothing once you've
+  chosen a class, and the stands are still right there for a respec.
+- **One DataStore record per player holds both the data and a session lock.**
+  Loading takes the lock in the same atomic `UpdateAsync` that reads the
+  data, every save renews it, and leaving releases it. A server that finds its
+  lock taken stops writing and kicks the player, so two servers never write
+  one profile at once and the newer session always wins.
+- **A lock is abandoned after 180 s without renewal** — three missed
+  autosaves. That's the price of a server crash: its players can't rejoin for
+  up to three minutes. A longer timeout rides out DataStore outages more
+  safely but locks players out longer after a crash. Revisit if either shows
+  up in practice.
+- **Never overwrite what can't be read.** A record from a newer game version,
+  or one that isn't a record at all, stops the load and leaves the stored
+  value untouched, rather than being replaced with a fresh profile.
+- **Sanitising never drops unrecognised ids.** An unknown weapon, class or
+  item may be newer content; during a rollback, an older server re-saving a
+  profile must not delete that progress. Malformed *shapes* are fixed or
+  dropped; unknown *names* are kept. The one thing a rollback can cost is which
+  weapon was equipped, because a server can't equip a weapon it doesn't have.
+- **No session that won't save.** In a live server, a profile that can't be
+  loaded safely kicks the player with a specific explanation, instead of
+  letting them play and lose everything on leave.
+- **Characters only exist once progress has loaded** (`CharacterAutoLoads`
+  off; `SpawnService` spawns). Before that there is nothing to interact with,
+  so nothing can change a profile that hasn't been read — no loading race to
+  guard in every service.
+- **Persisted services never clean up on `PlayerRemoving`.** Roblox doesn't
+  guarantee handler order, so a service clearing its state could beat the
+  final save and write an empty profile. `DataService` releases each service
+  only after that save. This was a real bug in the first draft: all three
+  services originally cleared themselves on leave.
+- **Writes to one profile are serialised.** An autosave landing after the
+  final release would silently re-lock the profile and keep the player out of
+  their next server for the full stale timeout.
+- **Studio uses its own DataStore** (`PlayerData_v1_Studio`), so playtests can
+  never touch live progress. Without DataStore access, Studio runs an unsaved
+  session and says so on screen, rather than kicking.
+- **The inventory is capped at 500 items**, to keep one record well inside
+  the DataStore size limit. A chest opened with a full inventory stays shut,
+  rather than being consumed and losing its item to the cap at save time.
+
 ## Open / not yet decided
 
 - ~~Is solo play fully supported, or is this group-first content? This changes
@@ -421,4 +472,6 @@ lowerCamelCase (`CombatServer.start`) rather than the fork's PascalCase.
    fork; the numeric balance pass still needs playtesting.
 9. ~~PvP arena mode.~~ Built on Maat8688's fork; rebuilt on this branch's
    combat rules at the merge.
-10. Persistence (DataStores), polish, VFX.
+10. Persistence (DataStores), polish, VFX. Persistence built; untested
+    against a real DataStore until the place is published with Studio API
+    access enabled.

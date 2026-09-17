@@ -1,8 +1,7 @@
 --!strict
 -- The only place equipped-weapon state lives. Kept separate from CombatServer
 -- so the weapon stands and the blacksmith can equip or upgrade a player
--- without reaching into combat internals. In-memory only — resets on rejoin
--- until DataStore persistence lands in build-order step 10.
+-- without reaching into combat internals. Loaded and saved by DataService.
 --
 -- Per-weapon upgrade levels live here too, for the same one-place reason: an
 -- upgrade is weapon state. BlacksmithService owns the economy side (price,
@@ -12,7 +11,6 @@
 -- A player's class is never stored here: it is always derived from the
 -- equipped weapon through Loadout.
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage.Shared
@@ -90,9 +88,36 @@ function EquipService.applyUpgrade(player: Player, weaponId: string): number
 	return newLevel
 end
 
-Players.PlayerRemoving:Connect(function(player)
+--[[ Persistence hooks, called only by DataService ]]
+
+-- Replaces this player's state with what was loaded.
+--
+-- A saved weapon this server doesn't recognise — newer content, seen during a
+-- rollback — can't be held, so the player starts unequipped. Its upgrade level
+-- is kept, and written back on the next save.
+function EquipService.hydrate(player: Player, weaponId: string?, levels: { [string]: number })
+	upgradeLevels[player] = table.clone(levels)
+
+	if weaponId and Loadout.resolve(weaponId).ok then
+		equipped[player] = weaponId
+		publish(player, weaponId)
+	else
+		equipped[player] = nil
+	end
+end
+
+-- Copies, so a save in flight can't see state change underneath it.
+function EquipService.snapshot(player: Player): (string?, { [string]: number })
+	return equipped[player], table.clone(upgradeLevels[player] or {})
+end
+
+-- There is deliberately no PlayerRemoving cleanup here. Roblox doesn't
+-- guarantee the order PlayerRemoving handlers run in, so clearing state there
+-- could beat DataService's final save and write an empty profile. DataService
+-- calls this once that save is done.
+function EquipService.release(player: Player)
 	equipped[player] = nil
 	upgradeLevels[player] = nil
-end)
+end
 
 return EquipService

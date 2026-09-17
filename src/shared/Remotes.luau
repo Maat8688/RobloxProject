@@ -31,7 +31,8 @@ local REMOTE_EVENTS = {
 	"AttackResult",
 	"HealBurst",
 
-	-- Server -> Client: equipment and economy
+	-- Server -> Client: profile, equipment and economy
+	"ProfileLoaded",
 	"WeaponEquipped",
 	"ChestOpened",
 	"InventoryUpdated",

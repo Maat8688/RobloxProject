@@ -1,39 +1,57 @@
 --!strict
 -- The only place inventory state lives, mirroring EquipService's shape.
--- In-memory only — resets on rejoin until DataStore persistence lands in
--- build-order step 10.
+-- Loaded and saved by DataService.
 --
 -- A plain list rather than a map keyed by itemId: a map can't hold two copies
 -- of the same item, and each copy can carry its own upgradeLevel. Items are
 -- collectible only for now — they aren't consumed by the blacksmith.
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Shared = ReplicatedStorage.Shared
+local PlayerDataSchema = require(Shared.PlayerDataSchema)
+local Remotes = require(Shared.Remotes)
 
 local InventoryService = {}
 
--- Matches ARCHITECTURE.md's ItemInstance schema.
-export type ItemInstance = {
-	itemId: string,
-	rarity: string,
-	upgradeLevel: number,
-	-- nil for class-neutral materials; set only for real class gear.
-	classTag: string?,
-}
+export type ItemInstance = PlayerDataSchema.ItemInstance
 
 local inventories: { [Player]: { ItemInstance } } = {}
 
-function InventoryService.addItem(player: Player, item: ItemInstance)
+local function publish(player: Player, inventory: { ItemInstance })
+	Remotes.get("InventoryUpdated"):FireClient(player, { items = inventory })
+end
+
+local function copyItems(items: { ItemInstance }): { ItemInstance }
+	local copy = {}
+	for _, item in items do
+		table.insert(copy, table.clone(item))
+	end
+	return copy
+end
+
+-- Whether another item fits. The cap is the save format's, so the game
+-- refuses an item up front rather than letting a save quietly drop it.
+function InventoryService.hasRoom(player: Player): boolean
+	local inventory = inventories[player]
+	return inventory == nil or #inventory < PlayerDataSchema.MAX_INVENTORY
+end
+
+-- Returns whether the item was added.
+function InventoryService.addItem(player: Player, item: ItemInstance): boolean
+	if not InventoryService.hasRoom(player) then
+		return false
+	end
+
 	local inventory = inventories[player]
 	if not inventory then
 		inventory = {}
 		inventories[player] = inventory
 	end
 
-	table.insert(inventory, item)
-	Remotes.get("InventoryUpdated"):FireClient(player, { items = inventory })
+	table.insert(inventory, table.clone(item))
+	publish(player, inventory)
+	return true
 end
 
 -- The player's current item list (empty if they have none).
@@ -41,8 +59,24 @@ function InventoryService.getInventory(player: Player): { ItemInstance }
 	return inventories[player] or {}
 end
 
-Players.PlayerRemoving:Connect(function(player)
+--[[ Persistence hooks, called only by DataService ]]
+
+function InventoryService.hydrate(player: Player, items: { ItemInstance })
+	local inventory = copyItems(items)
+	inventories[player] = inventory
+	publish(player, inventory)
+end
+
+-- Copies, so a save in flight can't see state change underneath it.
+function InventoryService.snapshot(player: Player): { ItemInstance }
+	return copyItems(inventories[player] or {})
+end
+
+-- No PlayerRemoving cleanup here: clearing on leave could beat DataService's
+-- final save and write an empty inventory. DataService calls this after that
+-- save.
+function InventoryService.release(player: Player)
 	inventories[player] = nil
-end)
+end
 
 return InventoryService

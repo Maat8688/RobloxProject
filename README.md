@@ -48,6 +48,15 @@ Roblox Studio:
 rojo serve
 ```
 
+### Saving in Studio
+
+Progress saves to a DataStore. Studio uses a separate store from live servers, so
+playtests never touch real players' progress. Studio can only reach DataStores once
+the place is published and **Game Settings → Security → Enable Studio Access to API
+Services** is on. Without that, Studio runs an unsaved session and says so on screen.
+
+### Linting
+
 Lint the source with [selene](https://github.com/Kampfkarren/selene):
 
 ```sh

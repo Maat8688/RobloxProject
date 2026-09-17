@@ -73,19 +73,31 @@ function ChestService.createChest(cframe: CFrame, guard: EnemyAI.Enemy, parent: 
 			if opened then
 				return
 			end
+
+			-- A full inventory leaves the chest shut for later, rather than
+			-- consuming it and losing the item.
+			if not InventoryService.hasRoom(player) then
+				Remotes.get("ChestOpened"):FireClient(player, {
+					chestId = chestId,
+					loot = {},
+					inventoryFull = true,
+				})
+				return
+			end
+
 			opened = true
 			prompt.Enabled = false
-
-			Remotes.get("ChestOpened"):FireClient(player, {
-				chestId = chestId,
-				loot = { loot },
-			})
 
 			InventoryService.addItem(player, {
 				itemId = loot.itemId,
 				rarity = loot.rarity,
 				upgradeLevel = 0,
 				classTag = loot.classTag,
+			})
+
+			Remotes.get("ChestOpened"):FireClient(player, {
+				chestId = chestId,
+				loot = { loot },
 			})
 		end)
 	end)

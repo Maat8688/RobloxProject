@@ -155,6 +155,18 @@ function GameUI.start()
 		flashHeal(0.3)
 	end)
 
+	-- Only ever false in Studio: a live server kicks rather than run a session
+	-- it can't save. Said plainly, so a tester doesn't mistake it for a bug in
+	-- saving.
+	local unsavedNotice = makeLabel(gui, UDim2.fromOffset(420, 26), UDim2.new(0.5, -210, 0, 8), 16)
+	unsavedNotice.TextColor3 = BAD
+	unsavedNotice.Text = "Progress isn't being saved in this session (Studio has no DataStore access)"
+	unsavedNotice.Visible = false
+
+	Remotes.get("ProfileLoaded").OnClientEvent:Connect(function(payload)
+		unsavedNotice.Visible = not payload.persistent
+	end)
+
 	Remotes.get("WeaponEquipped").OnClientEvent:Connect(function(payload)
 		local def = Loadout.getDef(payload.weaponId)
 		local text = `Weapon: {def.displayName} ({payload.classTag})`
@@ -185,6 +197,11 @@ function GameUI.start()
 	end)
 
 	Remotes.get("ChestOpened").OnClientEvent:Connect(function(payload)
+		if payload.inventoryFull then
+			flashLoot("Inventory full — the chest stays shut for now", BAD, 3)
+			return
+		end
+
 		local item = payload.loot[1]
 		if item then
 			flashLoot(`Found: {item.name} — {item.flavor}`, GOLD, 3)

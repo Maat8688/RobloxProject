@@ -1,7 +1,6 @@
 --!strict
 -- The only place currency state lives, mirroring EquipService and
--- InventoryService. In-memory only — resets on rejoin until DataStore
--- persistence lands in build-order step 10.
+-- InventoryService. Loaded and saved by DataService.
 --
 -- Two currencies (DESIGN.md): coins drop from every kill, crystals only from
 -- enemies whose EnemyDefs entry sets crystalReward. Crystals are keyed by
@@ -9,7 +8,6 @@
 -- switching weapon doesn't carry your upgrade materials across. That is where
 -- respeccing's real cost comes from.
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage.Shared
@@ -94,8 +92,28 @@ function CurrencyService.trackEnemy(enemy: EnemyAI.Enemy)
 	end)
 end
 
-Players.PlayerRemoving:Connect(function(player)
+--[[ Persistence hooks, called only by DataService ]]
+
+function CurrencyService.hydrate(player: Player, coins: number, crystals: { [string]: number })
+	local balance: Balance = { coins = coins, crystals = table.clone(crystals) }
+	balances[player] = balance
+	publish(player, balance)
+end
+
+-- Copies, so a save in flight can't see state change underneath it.
+function CurrencyService.snapshot(player: Player): (number, { [string]: number })
+	local balance = balances[player]
+	if not balance then
+		return 0, {}
+	end
+
+	return balance.coins, table.clone(balance.crystals)
+end
+
+-- No PlayerRemoving cleanup here: clearing on leave could beat DataService's
+-- final save and write zero coins. DataService calls this after that save.
+function CurrencyService.release(player: Player)
 	balances[player] = nil
-end)
+end
 
 return CurrencyService

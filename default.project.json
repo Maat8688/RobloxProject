@@ -4,6 +4,12 @@
   "tree": {
     "$className": "DataModel",
 
+    "Players": {
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    },
+
     "ReplicatedStorage": {
       "Shared": {
         "$path": "src/shared"

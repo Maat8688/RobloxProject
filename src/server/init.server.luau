@@ -1,16 +1,18 @@
 --!strict
--- Server bootstrap: combat authority, then the dungeon, then the start-room
--- stations and the duel arena.
+-- Server bootstrap: combat authority, the dungeon, the start-room stations and
+-- the duel arena — then players, who only get a character once their saved
+-- progress has loaded.
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local CombatServer = require(script.Combat.CombatServer)
+local DataService = require(script.DataService)
 local DungeonGenerator = require(script.Dungeon.DungeonGenerator)
 local BlacksmithService = require(script.Economy.BlacksmithService)
 local ArenaService = require(script.PvP.ArenaService)
+local SpawnService = require(script.SpawnService)
 local WeaponPickups = require(script.WeaponPickups)
 
 -- Remotes must exist before any client starts waiting on them.
@@ -26,30 +28,13 @@ BlacksmithService.start(dungeon.startCFrame)
 ArenaService.start(dungeon.startCFrame)
 
 -- Players start in the safe start room, facing down the dungeon, with the
--- weapon stands in front of them. There is no SpawnLocation, so without this
--- they'd appear wherever Roblox's default puts them.
-local spawnCFrame = CFrame.lookAt(
+-- weapon stands in front of them. There's no SpawnLocation; SpawnService
+-- places every character here.
+SpawnService.start(CFrame.lookAt(
 	dungeon.startCFrame.Position + Vector3.new(0, 4, 0),
 	dungeon.startCFrame.Position + Vector3.new(0, 4, 20)
-)
+))
 
-local function placeCharacter(character: Model)
-	local root = character:WaitForChild("HumanoidRootPart", 5) :: BasePart?
-	if root then
-		character:PivotTo(spawnCFrame)
-	end
-end
-
-local function onPlayerAdded(player: Player)
-	player.CharacterAdded:Connect(placeCharacter)
-	if player.Character then
-		placeCharacter(player.Character)
-	end
-end
-
-Players.PlayerAdded:Connect(onPlayerAdded)
-
--- In Studio the local player can join before this script connects.
-for _, player in Players:GetPlayers() do
-	onPlayerAdded(player)
-end
+-- Last, so everything a loaded player can touch already exists. DataService
+-- hands each player to SpawnService once their profile is ready.
+DataService.start()
